@@ -43,6 +43,7 @@ import app.aaps.core.interfaces.overview.graph.DeviationsGraphData
 import app.aaps.core.interfaces.overview.graph.EpsGraphPoint
 import app.aaps.core.interfaces.overview.graph.ExtendedBolusGraphPoint
 import app.aaps.core.interfaces.overview.graph.GraphDataPoint
+import app.aaps.core.interfaces.overview.graph.HeartRateGraphData
 import app.aaps.core.interfaces.overview.graph.IobGraphData
 import app.aaps.core.interfaces.overview.graph.OverviewDataCache
 import app.aaps.core.interfaces.overview.graph.ProfileDisplayData
@@ -50,6 +51,7 @@ import app.aaps.core.interfaces.overview.graph.RatioGraphData
 import app.aaps.core.interfaces.overview.graph.RunningModeDisplayData
 import app.aaps.core.interfaces.overview.graph.RunningModeGraphData
 import app.aaps.core.interfaces.overview.graph.RunningModeSegment
+import app.aaps.core.interfaces.overview.graph.StepsGraphData
 import app.aaps.core.interfaces.overview.graph.TargetLineData
 import app.aaps.core.interfaces.overview.graph.TempTargetDisplayData
 import app.aaps.core.interfaces.overview.graph.TempTargetState
@@ -65,6 +67,8 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventBucketedDataCreated
 import app.aaps.core.interfaces.rx.events.EventIobCalculationProgress
+import app.aaps.core.interfaces.rx.events.EventLoopUpdateGui
+import app.aaps.core.interfaces.rx.events.EventNewOpenLoopNotification
 import app.aaps.core.interfaces.rx.events.EventNsClientStatusUpdated
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.DecimalFormatter
@@ -89,6 +93,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -186,6 +191,10 @@ class OverviewDataCacheImpl @Inject constructor(
     override val devSlopeGraphFlow: StateFlow<DevSlopeGraphData> = _devSlopeGraphFlow.asStateFlow()
     private val _varSensGraphFlow = MutableStateFlow(VarSensGraphData(emptyList()))
     override val varSensGraphFlow: StateFlow<VarSensGraphData> = _varSensGraphFlow.asStateFlow()
+    private val _heartRateGraphFlow = MutableStateFlow(HeartRateGraphData(emptyList()))
+    override val heartRateGraphFlow: StateFlow<HeartRateGraphData> = _heartRateGraphFlow.asStateFlow()
+    private val _stepsGraphFlow = MutableStateFlow(StepsGraphData(emptyList()))
+    override val stepsGraphFlow: StateFlow<StepsGraphData> = _stepsGraphFlow.asStateFlow()
     private val _treatmentGraphFlow = MutableStateFlow(TreatmentGraphData(emptyList(), emptyList(), emptyList(), emptyList()))
     override val treatmentGraphFlow: StateFlow<TreatmentGraphData> = _treatmentGraphFlow.asStateFlow()
     private val _epsGraphFlow = MutableStateFlow<List<EpsGraphPoint>>(emptyList())
@@ -266,14 +275,31 @@ class OverviewDataCacheImpl @Inject constructor(
 
         // Observe treatment-related DB changes
         for (type in listOf(
-            BS::class.java, CA::class.java, EB::class.java,
-            TE::class.java, HR::class.java, SC::class.java
+            BS::class.java, CA::class.java, EB::class.java, TE::class.java
         )) {
             scope.launch {
                 persistenceLayer.observeChanges(type)
                     .debounce(300)
                     .collect { rebuildTreatmentGraph() }
             }
+        }
+        // Observe HR changes for treatment graph + heart rate graph
+        scope.launch {
+            persistenceLayer.observeChanges(HR::class.java)
+                .debounce(300)
+                .collect {
+                    rebuildTreatmentGraph()
+                    rebuildHeartRateGraph()
+                }
+        }
+        // Observe SC changes for treatment graph + steps graph
+        scope.launch {
+            persistenceLayer.observeChanges(SC::class.java)
+                .debounce(300)
+                .collect {
+                    rebuildTreatmentGraph()
+                    rebuildStepsGraph()
+                }
         }
         // Rebuild all Category B graphs when time range changes
         scope.launch {
@@ -286,6 +312,8 @@ class OverviewDataCacheImpl @Inject constructor(
                     rebuildRunningModeGraph()
                     rebuildTargetLine()
                     rebuildBasalGraph()
+                    rebuildHeartRateGraph()
+                    rebuildStepsGraph()
                 }
         }
 
@@ -307,6 +335,14 @@ class OverviewDataCacheImpl @Inject constructor(
                     updateTempTargetFromDatabase()
                     rebuildTargetLine()
                 }
+        }
+        // Refresh TT chip after APS loop runs so the APS-adjusted target (read from
+        // loop.lastRun.constraintsProcessed.targetBG) is reflected in the ADJUSTED state.
+        scope.launch {
+            merge(
+                rxBus.toFlow(EventLoopUpdateGui::class.java),
+                rxBus.toFlow(EventNewOpenLoopNotification::class.java)
+            ).collect { updateTempTargetFromDatabase() }
         }
         // EPS changes affect EPS graph, profile chip, TT chip, target line, and basal
         scope.launch {
@@ -545,6 +581,14 @@ class OverviewDataCacheImpl @Inject constructor(
 
     override fun updateVarSensGraph(data: VarSensGraphData) {
         _varSensGraphFlow.value = data
+    }
+
+    override fun updateHeartRateGraph(data: HeartRateGraphData) {
+        _heartRateGraphFlow.value = data
+    }
+
+    override fun updateStepsGraph(data: StepsGraphData) {
+        _stepsGraphFlow.value = data
     }
 
     // =========================================================================
@@ -851,6 +895,23 @@ class OverviewDataCacheImpl @Inject constructor(
         _nsClientStatusFlow.value = AapsClientStatusData(pump = pumpItem, openAps = openApsItem, uploader = uploaderItem)
     }
 
+    private suspend fun rebuildHeartRateGraph() {
+        val (fromTime, toTime) = graphTimeRange() ?: return
+        val heartRates = persistenceLayer.getHeartRatesFromTimeToTime(fromTime, toTime)
+            .filter { it.isValid }
+            // Plot at sampling start: HR.timestamp is the end of the sampling period (matches legacy HeartRateDataPoint.getX())
+            .map { hr -> GraphDataPoint(timestamp = hr.timestamp - hr.duration, value = hr.beatsPerMinute) }
+        _heartRateGraphFlow.value = HeartRateGraphData(heartRates)
+    }
+
+    private suspend fun rebuildStepsGraph() {
+        val (fromTime, toTime) = graphTimeRange() ?: return
+        val steps = persistenceLayer.getStepsCountFromTimeToTime(fromTime, toTime)
+            .filter { it.isValid }
+            .map { sc -> GraphDataPoint(timestamp = sc.timestamp, value = sc.steps5min.toDouble()) }
+        _stepsGraphFlow.value = StepsGraphData(steps)
+    }
+
     override fun reset() {
         _timeRangeFlow.value = null
         _bgReadingsFlow.value = emptyList()
@@ -870,6 +931,8 @@ class OverviewDataCacheImpl @Inject constructor(
         _ratioGraphFlow.value = RatioGraphData(emptyList())
         _devSlopeGraphFlow.value = DevSlopeGraphData(emptyList(), emptyList())
         _varSensGraphFlow.value = VarSensGraphData(emptyList())
+        _heartRateGraphFlow.value = HeartRateGraphData(emptyList())
+        _stepsGraphFlow.value = StepsGraphData(emptyList())
         _treatmentGraphFlow.value = TreatmentGraphData(emptyList(), emptyList(), emptyList(), emptyList())
         _epsGraphFlow.value = emptyList()
         _basalGraphFlow.value = BasalGraphData(emptyList(), emptyList(), 0.0)

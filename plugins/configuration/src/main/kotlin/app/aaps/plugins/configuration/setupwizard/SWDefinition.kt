@@ -32,7 +32,6 @@ import app.aaps.core.keys.StringKey
 import app.aaps.core.keys.UnitDoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.objects.crypto.CryptoUtil
-import app.aaps.core.objects.profile.ProfileSealed
 import app.aaps.plugins.configuration.R
 import app.aaps.plugins.configuration.configBuilder.events.EventConfigBuilderUpdateGui
 import app.aaps.plugins.configuration.setupwizard.elements.SWBreak
@@ -182,8 +181,15 @@ class SWDefinition @Inject constructor(
         get() = swScreenProvider.get().with(app.aaps.core.ui.R.string.import_setting)
             .add(swInfoTextProvider.get().label(R.string.storedsettingsfound))
             .add(swBreakProvider.get())
-            .add(swButtonProvider.get().text(app.aaps.core.ui.R.string.import_setting).action { importExportPrefs.importSharedPreferences(requireActivity()) })
-            .visibility { importExportPrefs.prefsFileExists() }
+            .add(swButtonProvider.get().text(app.aaps.core.ui.R.string.import_setting).action {
+                // TODO replace by compose
+                //  importExportPrefs.importSharedPreferences(requireActivity())
+            })
+            .visibility {
+                // TODO replace by compose
+                // importExportPrefs.prefsFileExists()
+                true
+            }
 
     private val screenNsClient
         get() = swScreenProvider.get().with(app.aaps.core.ui.R.string.configbuilder_sync)
@@ -254,15 +260,6 @@ class SWDefinition @Inject constructor(
             .skippable(false)
             .add(swPluginProvider.get().option(PluginType.BGSOURCE, R.string.configbuilder_bgsource_description))
             .add(swBreakProvider.get())
-
-    private val screenLocalProfile
-        get() = swScreenProvider.get().with(R.string.profile)
-            .skippable(false)
-            .add(swFragmentProvider.get().with((activePlugin.activeProfileSource as PluginBase).pluginDescription.fragmentClass!!))
-            .validator {
-                localProfileManager.profile?.getDefaultProfile()
-                    ?.let { ProfileSealed.Pure(it, activePlugin).isValid("StartupWizard", activePlugin.activePump, config, rh, notificationManager, hardLimits, false).isValid } == true
-            }
 
     private val screenProfileSwitch
         get() = swScreenProvider.get().with(app.aaps.core.ui.R.string.careportal_profileswitch)
@@ -356,7 +353,7 @@ class SWDefinition @Inject constructor(
             .add(screenAge)
             .add(screenInsulin)
             .add(screenBgSource)
-            .add(screenLocalProfile)
+
             .add(screenProfileSwitch)
             .add(screenPump)
             .add(screenAps)
@@ -376,7 +373,7 @@ class SWDefinition @Inject constructor(
             .add(screenAge)
             .add(screenInsulin)
             .add(screenBgSource)
-            .add(screenLocalProfile)
+
             .add(screenProfileSwitch)
             .add(screenPump)
             .add(screenSensitivity)
