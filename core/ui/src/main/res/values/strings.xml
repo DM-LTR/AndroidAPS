@@ -4,6 +4,7 @@
     <string name="error_url_not_valid">Web Url is not valid</string>
     <string name="error_mustbe4hexadidits">Must be 4 characters of ABCDEF0123456789</string>
     <!--    General-->
+    <string name="temp_basal_overview_short_name">T:</string>
     <string name="treatments">Treatments</string>
     <string name="treatments_desc">View and manage treatment history</string>
     <string name="nav_configuration">Configuration</string>
@@ -291,10 +292,10 @@
     <string name="current_insulin">Currently active</string>
     <string name="change_insulin">Change</string>
     <string name="select_insulin_description">Select the insulin you are filling the pump with. A profile switch will be applied after activation/prime.</string>
-    <string name="bolus_delivered">%1$.2fU / %2$.2fU</string>
-    <string name="bolus_delivered_CU">%1$.2fCU / %2$.2fCU</string>
-    <string name="pump_insulin_cu">%1$.2f CU</string>
-    <string name="pump_insulin_cu1">%1$.1f CU</string>
+    <string name="bolus_delivered">%1$.2f\u00a0U / %2$.2f\u00a0U</string>
+    <string name="bolus_delivered_CU">%1$.2f\u00a0CU / %2$.2f\u00a0CU</string>
+    <string name="pump_insulin_cu">%1$.2f\u00a0CU</string>
+    <string name="pump_insulin_cu1">%1$.1f\u00a0CU</string>
     <string name="selected_insulin">Selected Insulin: %1$s</string>
     <string name="record_insulin_hint">If entering insulin applied by pen, select the correct insulin type below. The dose is always in International Units.</string>
 
@@ -429,6 +430,7 @@
 
     <!--    Command-->
     <string name="connectiontimedout">Connection timed out</string>
+    <string name="pump_not_configured">Pump not configured</string>
 
     <!--    PumpEnactResult-->
     <string name="enacted">Enacted</string>
@@ -659,6 +661,8 @@
     <string name="wizard_carb_time">Carb time</string>
     <string name="carb_time_now">Now</string>
     <string name="change">Change</string>
+    <string name="grant">Grant</string>
+    <string name="set">Set</string>
     <string name="wizard_set_alarm">Set alarm</string>
     <string name="wizard_use_percentage">Use percentage</string>
     <string name="wizard_include_bg">Include BG</string>
@@ -722,6 +726,7 @@
     <string name="clicked_connect_to_pump" comment="26 characters max for translation">Clicked connect to pump</string>
     <string name="reservoir_value">%1$.0f / %2$d U</string>
     <string name="daily_units">Daily units</string>
+    <string name="max_daily_units">Max daily units</string>
     <string name="pump_icon">Pump icon</string>
     <string name="view_profile">View profile</string>
     <string name="pump_history">Pump history</string>
@@ -745,6 +750,7 @@
     <string name="firmware" comment="Pump firmware version label">Firmware</string>
     <string name="bolusspeed" comment="Speed at which bolus is delivered">Bolus speed</string>
     <string name="history" comment="Tab/screen title for viewing past events">History</string>
+    <string name="overview_reservoir_concentration_value_over">Over %1$s left</string>
 
     <!--    Constraints-->
     <string name="limitingbasalratio">Limiting max basal rate to %1$.2f U/h because of %2$s</string>
@@ -844,10 +850,6 @@
     <string name="cloud_auth_success">Cloud storage authentication successful</string>
     <string name="authorization_status">Authorization Status</string>
 
-    <!-- NumberPicker -->
-    <string name="a11y_min_button_description">decrement %1$s by %2$s</string>
-    <string name="a11y_plus_button_description">increment %1$s by %2$s</string>
-    <string name="you_are_on_allowed_limit">Allowed limit reached</string>
     <string name="format_hour_minute">%1$dh %2$dm</string>
 
     <!-- datetime layout -->
@@ -953,15 +955,6 @@
     <string name="weekday_wednesday_short">Wed</string>
     <string name="weekday_tuesday_short">Tue</string>
     <string name="weekday_monday_short">Mon</string>
-
-    <!-- WeekdayPicker -->
-    <string name="monday_short">M</string>
-    <string name="tuesday_short">T</string>
-    <string name="wednesday_short">W</string>
-    <string name="thursday_short">T</string>
-    <string name="friday_short">F</string>
-    <string name="saturday_short">S</string>
-    <string name="sunday_short">S</string>
 
     <!--    DecimalFormatterImpl -->
     <string name="format_insulin_units1">%1$.1f U</string>
@@ -1083,6 +1076,8 @@
     <string name="graph_edit">Edit graph</string>
     <string name="graph_number">Graph %1$d</string>
     <string name="graph_bg">BG graph</string>
+    <string name="graph_height">Graph height [dp]</string>
+    <string name="predictions_shortname" comment="Short label for Predictions graph series">PRED</string>
     <string name="basal_shortname" comment="Short label for Basal, used in graph labels">BAS</string>
     <!-- Graph series short names (used as graph labels, keep very short) -->
     <string name="deviation_shortname" comment="Short label for Deviations graph series">DEV</string>

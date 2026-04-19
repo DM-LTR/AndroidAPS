@@ -1,6 +1,7 @@
 package app.aaps
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -27,6 +28,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.TrendingFlat
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +47,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -51,6 +57,8 @@ import androidx.core.app.ActivityCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.NavController
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -59,20 +67,22 @@ import androidx.navigation.compose.rememberNavController
 import app.aaps.compose.navigation.AppRoute
 import app.aaps.compose.navigation.appNavGraph
 import app.aaps.core.data.ue.Sources
+import app.aaps.core.interfaces.bgQualityCheck.BgQualityCheck
 import app.aaps.core.interfaces.configuration.Config
 import app.aaps.core.interfaces.configuration.ConfigBuilder
 import app.aaps.core.interfaces.configuration.InitProgress
+import app.aaps.core.interfaces.constraints.Objectives
+import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.iob.IobCobCalculator
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.maintenance.FileListProvider
-import app.aaps.core.interfaces.maintenance.ImportExportPrefs
 import app.aaps.core.interfaces.notifications.NotificationId
 import app.aaps.core.interfaces.notifications.NotificationLevel
 import app.aaps.core.interfaces.notifications.NotificationManager
+import app.aaps.core.interfaces.overview.graph.OverviewDataCache
 import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBase
-import app.aaps.core.interfaces.profile.LocalProfileManager
 import app.aaps.core.interfaces.profile.ProfileUtil
 import app.aaps.core.interfaces.protection.PasswordCheck
 import app.aaps.core.interfaces.protection.ProtectionCheck
@@ -82,7 +92,6 @@ import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.source.DexcomBoyda
-import app.aaps.core.interfaces.source.XDripSource
 import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
@@ -100,7 +109,6 @@ import app.aaps.core.ui.compose.LocalProfileUtil
 import app.aaps.core.ui.compose.ProtectionHost
 import app.aaps.core.ui.compose.ScreenMode
 import app.aaps.core.ui.compose.dialogs.OkDialog
-import app.aaps.core.ui.compose.icons.Pump
 import app.aaps.core.ui.compose.navigation.ElementType
 import app.aaps.core.ui.compose.navigation.NavigationRequest
 import app.aaps.core.ui.compose.preference.LocalCheckPassword
@@ -114,15 +122,14 @@ import app.aaps.core.ui.search.SearchableItem
 import app.aaps.core.utils.isRunningRealPumpTest
 import app.aaps.implementation.plugin.PluginStore
 import app.aaps.implementation.protection.BiometricCheck
-import app.aaps.plugins.configuration.activities.OptimizationPermissionContract
-import app.aaps.plugins.configuration.activities.SingleFragmentActivity
-import app.aaps.plugins.configuration.setupwizard.SetupWizardActivity
+import app.aaps.plugins.configuration.setupwizard.SWDefinition
 import app.aaps.plugins.source.DexcomPlugin
 import app.aaps.plugins.source.activities.RequestDexcomPermissionActivity
 import app.aaps.ui.compose.automationSheet.AutomationViewModel
 import app.aaps.ui.compose.configuration.ConfigurationViewModel
 import app.aaps.ui.compose.fillDialog.FillPreselect
 import app.aaps.ui.compose.insulinManagement.InsulinManagementViewModel
+import app.aaps.ui.compose.loopSheet.LoopActionViewModel
 import app.aaps.ui.compose.main.MainScreen
 import app.aaps.ui.compose.main.MainViewModel
 import app.aaps.ui.compose.maintenance.ImportViewModel
@@ -159,7 +166,6 @@ class ComposeMainActivity : AppCompatActivity() {
 
     @Inject lateinit var rxBus: RxBus
     @Inject lateinit var rh: ResourceHelper
-    @Inject lateinit var importExportPrefs: ImportExportPrefs
     @Inject lateinit var aapsLogger: AAPSLogger
     @Inject lateinit var preferences: Preferences
     @Inject lateinit var uiInteraction: UiInteraction
@@ -169,23 +175,25 @@ class ComposeMainActivity : AppCompatActivity() {
     @Inject lateinit var cryptoUtil: CryptoUtil
     @Inject lateinit var activePlugin: ActivePlugin
     @Inject lateinit var configBuilder: ConfigBuilder
+    @Inject lateinit var swDefinition: SWDefinition
     @Inject lateinit var config: Config
     @Inject lateinit var profileUtil: ProfileUtil
     @Inject lateinit var visibilityContext: PreferenceVisibilityContext
-    @Inject lateinit var xDripSource: XDripSource
     @Inject lateinit var dexcomBoyda: DexcomBoyda
     @Inject lateinit var iobCobCalculator: IobCobCalculator
-    @Inject lateinit var persistenceLayer: app.aaps.core.interfaces.db.PersistenceLayer
+    @Inject lateinit var persistenceLayer: PersistenceLayer
     @Inject lateinit var prefFileList: FileListProvider
     @Inject lateinit var notificationManager: NotificationManager
     @Inject lateinit var dateUtil: DateUtil
     @Inject lateinit var builtInSearchables: BuiltInSearchables
-    @Inject lateinit var localProfileManager: LocalProfileManager
     @Inject lateinit var bolusProgressData: BolusProgressData
     @Inject lateinit var commandQueue: CommandQueue
+    @Inject lateinit var bgQualityCheck: BgQualityCheck
+    @Inject lateinit var objectives: Objectives
+    @Inject lateinit var graphViewModelFactory: GraphViewModel.Factory
+    @Inject lateinit var overviewDataCache: OverviewDataCache
 
     private var accessTree: ActivityResultLauncher<Uri?>? = null
-    private var callForBatteryOptimization: ActivityResultLauncher<Void?>? = null
     private var requestMultiplePermissions: ActivityResultLauncher<Array<String>>? = null
     private var onPermissionResultDenied: ((List<String>) -> Unit)? = null
 
@@ -196,7 +204,10 @@ class ComposeMainActivity : AppCompatActivity() {
     private val statusViewModel: StatusViewModel by viewModels()
     private val treatmentViewModel: TreatmentViewModel by viewModels()
     private val automationViewModel: AutomationViewModel by viewModels()
-    private val graphViewModel: GraphViewModel by viewModels()
+    private val loopActionViewModel: LoopActionViewModel by viewModels()
+    private val graphViewModel: GraphViewModel by viewModels {
+        viewModelFactory { initializer { graphViewModelFactory.create(overviewDataCache) } }
+    }
     private val treatmentsViewModel: TreatmentsViewModel by viewModels()
     private val insulinManagementViewModel: InsulinManagementViewModel by viewModels()
     private val tempTargetManagementViewModel: TempTargetManagementViewModel by viewModels()
@@ -240,9 +251,6 @@ class ComposeMainActivity : AppCompatActivity() {
                 contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
                 preferences.put(StringKey.AapsDirectoryUri, uri.toString())
             }
-        }
-        callForBatteryOptimization = registerForActivityResult(OptimizationPermissionContract()) {
-            updateButtons()
         }
         requestMultiplePermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
             val denied = mutableListOf<String>()
@@ -383,6 +391,7 @@ class ComposeMainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("BatteryLife")
     @Composable
     private fun AppContent(navController: NavHostController) {
         // Trigger initial refresh when app content first appears (after init completes)
@@ -393,7 +402,7 @@ class ComposeMainActivity : AppCompatActivity() {
             if (!preferences.get(BooleanNonKey.GeneralSetupWizardProcessed) && !isRunningRealPumpTest()) {
                 protectionCheck.requestProtection(ProtectionCheck.Protection.PREFERENCES) { result ->
                     if (result == ProtectionResult.GRANTED) {
-                        startActivity(Intent(this@ComposeMainActivity, SetupWizardActivity::class.java))
+                        navController.navigate(AppRoute.SetupWizard.route)
                     }
                 }
             }
@@ -427,11 +436,13 @@ class ComposeMainActivity : AppCompatActivity() {
                         when {
                             effect.group.permissions.contains(Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS) ->
                                 try {
-                                    callForBatteryOptimization?.launch(null)
+                                    startActivity(
+                                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                            data = "package:$packageName".toUri()
+                                        }
+                                    )
                                 } catch (_: ActivityNotFoundException) {
                                     snackbarHostState.showSnackbar(getString(app.aaps.plugins.configuration.R.string.alert_dialog_permission_battery_optimization_failed))
-                                } catch (_: IllegalStateException) {
-                                    snackbarHostState.showSnackbar(getString(app.aaps.plugins.configuration.R.string.error_asking_for_permissions))
                                 }
 
                             effect.group.permissions.contains(PluginStore.PERMISSION_SELECT_DIRECTORY)                  ->
@@ -506,10 +517,37 @@ class ComposeMainActivity : AppCompatActivity() {
 
                 // Pump setup button in bottom bar
                 val pumpPlugin = activePlugin.activePumpInternal as PluginBase
-                val showPumpSetup = (!activePlugin.activePump.isInitialized() || activePlugin.activePump.isSuspended()) && (pumpPlugin.hasComposeContent() || pumpPlugin.hasFragment())
-                val pumpSetupClassName = if (showPumpSetup) pumpPlugin.javaClass.simpleName else null
-                val pumpSetupIcon = if (showPumpSetup) pumpPlugin.pluginDescription.icon ?: Pump else null
-                val pumpSetupLabel = if (showPumpSetup) stringResource(pumpPlugin.pluginDescription.pluginName) else null
+                val showPumpSetup = (!activePlugin.activePump.isInitialized() || activePlugin.activePump.isSuspended()) &&
+                    pumpPlugin.hasComposeContent()
+                val pumpSetupPlugin = if (showPumpSetup) pumpPlugin else null
+
+                // Objectives progress badge (visible while objectives not all completed, in APS mode)
+                val objectivesPlugin = objectives as PluginBase
+                val objectivesTotal = objectives.size
+                val objectivesDone = objectives.accomplishedCount
+                val showObjectivesSetup = objectivesTotal > 0 && objectivesDone < objectivesTotal &&
+                    objectivesPlugin.isEnabled() && objectivesPlugin.hasComposeContent()
+                val objectivesSetupPlugin = if (showObjectivesSetup) objectivesPlugin else null
+                val objectivesProgressText = if (showObjectivesSetup) "$objectivesDone/$objectivesTotal" else null
+
+                // BG source shortcut: shown when BG quality check reports FLAT or DOUBLED
+                val bgQualityState by bgQualityCheck.stateFlow.collectAsStateWithLifecycle()
+                val bgSourcePlugin = activePlugin.activeBgSource as PluginBase
+                val showBgSetup = (bgQualityState == BgQualityCheck.State.FLAT || bgQualityState == BgQualityCheck.State.DOUBLED) &&
+                    bgSourcePlugin.hasComposeContent()
+                val bgSetupPlugin = if (showBgSetup) bgSourcePlugin else null
+                val bgQualityBadgeIcon: ImageVector? = if (showBgSetup) when (bgQualityState) {
+                    BgQualityCheck.State.RECALCULATED -> Icons.Filled.Warning
+                    BgQualityCheck.State.DOUBLED      -> Icons.Filled.Warning
+                    BgQualityCheck.State.FLAT         -> Icons.AutoMirrored.Filled.TrendingFlat
+                    else                              -> null
+                } else null
+                val bgQualityBadgeTint: Color = when (bgQualityState) {
+                    BgQualityCheck.State.RECALCULATED                       -> AapsTheme.generalColors.statusWarning
+                    BgQualityCheck.State.DOUBLED, BgQualityCheck.State.FLAT -> AapsTheme.generalColors.statusCritical
+                    else                                                    -> Color.Unspecified
+                }
+                val bgQualityBadgeDescription = if (showBgSetup) bgQualityCheck.stateDescription() else null
 
                 val manageSheetState = ManageSheetHost(
                     manageViewModel = manageViewModel,
@@ -545,6 +583,7 @@ class ComposeMainActivity : AppCompatActivity() {
                     statusViewModel = statusViewModel,
                     treatmentViewModel = treatmentViewModel,
                     automationViewModel = automationViewModel,
+                    loopActionViewModel = loopActionViewModel,
                     // Search
                     searchUiState = searchState,
                     onSearchQueryChange = { searchViewModel.onQueryChanged(it) },
@@ -559,7 +598,6 @@ class ComposeMainActivity : AppCompatActivity() {
                     onMenuClick = { mainViewModel.openDrawer() },
                     onNavigate = { request -> handleNavigationRequest(request, navController) },
                     onDrawerClosed = { mainViewModel.closeDrawer() },
-                    onSwitchToClassicUi = { switchToClassicUi() },
                     onAboutDialogDismiss = { mainViewModel.setShowAboutDialog(false) },
                     onMaintenanceSheetDismiss = { mainViewModel.setShowMaintenanceSheet(false) },
                     onDirectoryClick = {
@@ -603,9 +641,13 @@ class ComposeMainActivity : AppCompatActivity() {
                     },
                     autoShowNotificationSheet = _autoShowNotifications.value,
                     onAutoShowConsumed = { _autoShowNotifications.value = false },
-                    pumpSetupClassName = pumpSetupClassName,
-                    pumpSetupIcon = pumpSetupIcon,
-                    pumpSetupLabel = pumpSetupLabel,
+                    pumpSetupPlugin = pumpSetupPlugin,
+                    bgSetupPlugin = bgSetupPlugin,
+                    bgQualityBadgeIcon = bgQualityBadgeIcon,
+                    bgQualityBadgeTint = bgQualityBadgeTint,
+                    bgQualityBadgeDescription = bgQualityBadgeDescription,
+                    objectivesSetupPlugin = objectivesSetupPlugin,
+                    objectivesProgressText = objectivesProgressText,
                     permissionsMissing = permState.hasAnyMissing,
                     onPermissionsClick = {
                         permissionsViewModel.showSheet()
@@ -644,6 +686,8 @@ class ComposeMainActivity : AppCompatActivity() {
                 statsViewModel = statsViewModel,
                 siteRotationManagementViewModel = siteRotationManagementViewModel,
                 graphViewModel = graphViewModel,
+                swDefinition = swDefinition,
+                rxBus = rxBus,
                 activePlugin = activePlugin,
                 preferences = preferences,
                 rh = rh,
@@ -663,6 +707,13 @@ class ComposeMainActivity : AppCompatActivity() {
                 },
                 onRefreshPermissions = { permissionsViewModel.refresh() },
                 onExecuteQuickWizard = { guid -> mainViewModel.executeQuickWizard(this@ComposeMainActivity, guid) },
+                onRequestDirectoryAccess = {
+                    try {
+                        accessTree?.launch(null)
+                    } catch (_: Exception) {
+                    }
+                },
+                onRequestPermission = { group -> permissionsViewModel.requestPermission(group) },
                 findScreenDef = { key -> findScreenDef(key) },
             )
         }
@@ -686,6 +737,10 @@ class ComposeMainActivity : AppCompatActivity() {
         }
     }
 
+    private val pluginScreenDefsCache: List<PreferenceSubScreenDef> by lazy {
+        activePlugin.getPluginsList().mapNotNull { it.getPreferenceScreenContent() as? PreferenceSubScreenDef }
+    }
+
     private fun findScreenDef(key: String): PreferenceSubScreenDef? {
         // Check built-in screens from BuiltInSearchables (including nested subscreens)
         builtInSearchables.getSearchableItems().forEach { item ->
@@ -695,14 +750,11 @@ class ComposeMainActivity : AppCompatActivity() {
                 if (nested != null) return nested
             }
         }
-        // Check plugin screens (including nested subscreens)
-        for (plugin in activePlugin.getPluginsList()) {
-            val content = plugin.getPreferenceScreenContent()
-            if (content is PreferenceSubScreenDef) {
-                if (content.key == key) return content
-                val nested = findNestedScreen(content, key)
-                if (nested != null) return nested
-            }
+        // Check plugin screens (including nested subscreens) — cached to avoid walking all plugins on every lookup
+        for (content in pluginScreenDefsCache) {
+            if (content.key == key) return content
+            val nested = findNestedScreen(content, key)
+            if (nested != null) return nested
         }
         return null
     }
@@ -747,7 +799,6 @@ class ComposeMainActivity : AppCompatActivity() {
     }
 
     private fun updateButtons() {
-        // Called by activity result callbacks (battery optimization, runtime permissions)
         permissionsViewModel.refresh()
     }
 
@@ -758,7 +809,6 @@ class ComposeMainActivity : AppCompatActivity() {
     override fun onDestroy() {
         disposable.clear()
         accessTree = null
-        callForBatteryOptimization = null
         requestMultiplePermissions = null
         onPermissionResultDenied = null
         super.onDestroy()
@@ -782,11 +832,6 @@ class ComposeMainActivity : AppCompatActivity() {
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
-    }
-
-    private fun switchToClassicUi() {
-        startActivity(Intent(this, MainActivity::class.java))
-        finish()
     }
 
     private fun handleNotificationAction(notificationId: NotificationId, navController: NavController) {
@@ -940,8 +985,8 @@ class ComposeMainActivity : AppCompatActivity() {
             ElementType.TDD_CYCLE_PATTERN       -> navController.navigate(AppRoute.Stats.route)
 
             ElementType.PROFILE_HELPER          -> navController.navigate(AppRoute.ProfileHelper.route)
-            ElementType.HISTORY_BROWSER         -> startActivity(Intent(this@ComposeMainActivity, uiInteraction.historyBrowseActivity))
-            ElementType.SETUP_WIZARD            -> startActivity(Intent(this@ComposeMainActivity, SetupWizardActivity::class.java))
+            ElementType.HISTORY_BROWSER         -> navController.navigate(AppRoute.HistoryBrowser.route)
+            ElementType.SETUP_WIZARD            -> navController.navigate(AppRoute.SetupWizard.route)
             ElementType.MAINTENANCE             -> mainViewModel.setShowMaintenanceSheet(true)
             ElementType.CONFIGURATION           -> navController.navigate(AppRoute.Configuration.route)
             ElementType.ABOUT                   -> mainViewModel.setShowAboutDialog(true)
@@ -1008,12 +1053,6 @@ class ComposeMainActivity : AppCompatActivity() {
         val pluginIndex = activePlugin.getPluginsList().indexOf(plugin)
         if (plugin.hasComposeContent()) {
             navController?.navigate(AppRoute.PluginContent.createRoute(pluginIndex))
-        } else if (plugin.hasFragment()) {
-            startActivity(
-                Intent(this, SingleFragmentActivity::class.java)
-                    .setAction(this::class.simpleName)
-                    .putExtra("plugin", pluginIndex)
-            )
         }
     }
 }

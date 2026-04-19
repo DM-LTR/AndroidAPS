@@ -4,8 +4,6 @@ import android.content.Context
 import androidx.annotation.DrawableRes
 import androidx.annotation.RawRes
 import androidx.annotation.StringRes
-import androidx.fragment.app.FragmentManager
-import app.aaps.core.data.model.ICfg
 import app.aaps.core.interfaces.R
 
 /**
@@ -17,14 +15,8 @@ interface UiInteraction {
     /** The main activity of the application. */
     val mainActivity: Class<*>
 
-    /** The activity for browsing history. */
-    val historyBrowseActivity: Class<*>
-
     /** The activity for displaying error information. */
     val errorHelperActivity: Class<*>
-
-    /** A generic activity that can host a single fragment. */
-    val singleFragmentActivity: Class<*>
 
     /**
      * Display names for units preferences.
@@ -50,14 +42,6 @@ interface UiInteraction {
      * @param from A string indicating the source of the update request.
      */
     fun updateWidget(context: Context, from: String)
-
-    /**
-     * Shows the profile switch dialog.
-     * @param fragmentManager The fragment manager to use.
-     * @param profileName Optional pre-selected profile name.
-     * @param iCfg Optional iCfg to be used within EPS
-     */
-    fun runProfileSwitchDialog(fragmentManager: FragmentManager, profileName: String? = null, iCfg: ICfg? = null)
 
     /**
      * Defines modes for the site rotation dialog.
