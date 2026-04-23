@@ -35,6 +35,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import app.aaps.core.data.model.TE
 import app.aaps.core.data.time.T
+import app.aaps.core.interfaces.constraints.Objectives
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.maintenance.FileListProvider
 import app.aaps.core.interfaces.plugin.ActivePlugin
@@ -90,6 +91,8 @@ import app.aaps.ui.compose.quickWizard.QuickWizardManagementScreen
 import app.aaps.ui.compose.quickWizard.viewmodels.QuickWizardManagementViewModel
 import app.aaps.ui.compose.runningMode.RunningModeManagementViewModel
 import app.aaps.ui.compose.runningMode.RunningModeScreen
+import app.aaps.ui.compose.scenes.SceneListScreen
+import app.aaps.ui.compose.scenes.wizard.SceneWizardScreen
 import app.aaps.ui.compose.siteRotationDialog.SiteRotationManagementScreen
 import app.aaps.ui.compose.siteRotationDialog.SiteRotationSettingsScreen
 import app.aaps.ui.compose.siteRotationDialog.viewModels.SiteRotationManagementViewModel
@@ -502,6 +505,25 @@ fun NavGraphBuilder.appNavGraph(
         )
     }
 
+    composable(AppRoute.SceneList.route) {
+        SceneListScreen(
+            onNavigateToWizard = {
+                navController.navigate(AppRoute.SceneWizard.createRoute())
+            },
+            onNavigateToEditor = { sceneId ->
+                navController.navigate(AppRoute.SceneWizard.createRoute(sceneId))
+            },
+            onNavigateBack = { navController.popBackStack() }
+        )
+    }
+
+    composable(AppRoute.SceneWizard.route) {
+        SceneWizardScreen(
+            onFinished = { navController.popBackStack() },
+            onCancel = { navController.popBackStack() }
+        )
+    }
+
     composable(AppRoute.Configuration.route) {
         val configState by configurationViewModel.uiState.collectAsStateWithLifecycle()
         app.aaps.ui.compose.configuration.ConfigurationScreen(
@@ -620,6 +642,10 @@ fun NavGraphBuilder.appNavGraph(
             onManageInsulin = { navController.navigate(AppRoute.InsulinManagement.createRoute()) },
             onManageProfile = { navController.navigate(AppRoute.Profile.createRoute()) },
             onProfileSwitch = { navController.navigate(AppRoute.ProfileActivation.createRoute(0)) },
+            onRunObjectives = {
+                val index = activePlugin.getPluginsList().indexOfFirst { it is Objectives }
+                if (index >= 0) navController.navigate(AppRoute.PluginContent.createRoute(index))
+            },
             onRequestDirectoryAccess = onRequestDirectoryAccess,
             onRequestPermission = onRequestPermission,
             permissionItems = {

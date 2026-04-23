@@ -18,6 +18,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import app.aaps.core.data.model.RM
 import app.aaps.core.data.model.TT
+import app.aaps.core.interfaces.overview.graph.TbrState
+import app.aaps.core.ui.compose.AapsSpacing
 import app.aaps.core.ui.compose.icons.IcSettingsOff
 import app.aaps.core.ui.compose.navigation.ElementType
 import app.aaps.core.ui.compose.navigation.NavigationRequest
@@ -25,6 +27,7 @@ import app.aaps.ui.compose.main.TempTargetChipState
 import app.aaps.ui.compose.overview.chips.IobCobChipsRow
 import app.aaps.ui.compose.overview.chips.ProfileChip
 import app.aaps.ui.compose.overview.chips.RunningModeChip
+import app.aaps.ui.compose.overview.chips.TbrChip
 import app.aaps.ui.compose.overview.chips.TempTargetChip
 import app.aaps.ui.compose.overview.graphs.CobUiState
 import app.aaps.ui.compose.overview.graphs.IobUiState
@@ -34,14 +37,18 @@ fun OverviewChipsColumn(
     runningMode: RM.Mode,
     runningModeText: String,
     runningModeProgress: Float,
+    runningModeSceneManaged: Boolean = false,
     isSimpleMode: Boolean,
     profileName: String,
     isProfileModified: Boolean,
     profileProgress: Float,
+    profileSceneManaged: Boolean = false,
     tempTargetText: String,
     tempTargetState: TempTargetChipState,
     tempTargetProgress: Float,
     tempTargetReason: TT.Reason?,
+    tempTargetSceneManaged: Boolean = false,
+    tbrState: TbrState,
     iobUiState: IobUiState,
     cobUiState: CobUiState,
     onNavigate: (NavigationRequest) -> Unit,
@@ -67,14 +74,18 @@ fun OverviewChipsColumn(
                             runningMode = runningMode,
                             runningModeText = runningModeText,
                             runningModeProgress = runningModeProgress,
+                            runningModeSceneManaged = runningModeSceneManaged,
                             isSimpleMode = isSimpleMode,
                             profileName = profileName,
                             isProfileModified = isProfileModified,
                             profileProgress = profileProgress,
+                            profileSceneManaged = profileSceneManaged,
                             tempTargetText = tempTargetText,
                             tempTargetState = tempTargetState,
                             tempTargetProgress = tempTargetProgress,
                             tempTargetReason = tempTargetReason,
+                            tempTargetSceneManaged = tempTargetSceneManaged,
+                            tbrState = tbrState,
                             onNavigate = onNavigate
                         )
                     }
@@ -89,14 +100,18 @@ fun OverviewChipsColumn(
                 runningMode = runningMode,
                 runningModeText = runningModeText,
                 runningModeProgress = runningModeProgress,
+                runningModeSceneManaged = runningModeSceneManaged,
                 isSimpleMode = isSimpleMode,
                 profileName = profileName,
                 isProfileModified = isProfileModified,
                 profileProgress = profileProgress,
+                profileSceneManaged = profileSceneManaged,
                 tempTargetText = tempTargetText,
                 tempTargetState = tempTargetState,
                 tempTargetProgress = tempTargetProgress,
                 tempTargetReason = tempTargetReason,
+                tempTargetSceneManaged = tempTargetSceneManaged,
+                tbrState = tbrState,
                 onNavigate = onNavigate
             )
         }
@@ -112,14 +127,18 @@ private fun NarrowChips(
     runningMode: RM.Mode,
     runningModeText: String,
     runningModeProgress: Float,
+    runningModeSceneManaged: Boolean,
     isSimpleMode: Boolean,
     profileName: String,
     isProfileModified: Boolean,
     profileProgress: Float,
+    profileSceneManaged: Boolean,
     tempTargetText: String,
     tempTargetState: TempTargetChipState,
     tempTargetProgress: Float,
     tempTargetReason: TT.Reason?,
+    tempTargetSceneManaged: Boolean,
+    tbrState: TbrState,
     onNavigate: (NavigationRequest) -> Unit
 ) {
     if (runningModeText.isNotEmpty()) {
@@ -129,6 +148,7 @@ private fun NarrowChips(
                 text = runningModeText,
                 progress = runningModeProgress,
                 modifier = Modifier.weight(1f),
+                sceneManaged = runningModeSceneManaged,
                 onClick = { onNavigate(NavigationRequest.Element(ElementType.RUNNING_MODE)) }
             )
             if (isSimpleMode) {
@@ -148,16 +168,28 @@ private fun NarrowChips(
             profileName = profileName,
             isModified = isProfileModified,
             progress = profileProgress,
-            onClick = { onNavigate(NavigationRequest.Element(ElementType.PROFILE_MANAGEMENT)) }
+            onClick = { onNavigate(NavigationRequest.Element(ElementType.PROFILE_MANAGEMENT)) },
+            sceneManaged = profileSceneManaged
         )
     }
-    if (tempTargetText.isNotEmpty()) {
-        TempTargetChip(
-            targetText = tempTargetText,
-            state = tempTargetState,
-            progress = tempTargetProgress,
-            reason = tempTargetReason,
-            onClick = { onNavigate(NavigationRequest.Element(ElementType.TEMP_TARGET_MANAGEMENT)) }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(AapsSpacing.small)
+    ) {
+        if (tempTargetText.isNotEmpty()) {
+            TempTargetChip(
+                targetText = tempTargetText,
+                state = tempTargetState,
+                progress = tempTargetProgress,
+                reason = tempTargetReason,
+                modifier = Modifier.weight(1f),
+                onClick = { onNavigate(NavigationRequest.Element(ElementType.TEMP_TARGET_MANAGEMENT)) },
+                sceneManaged = tempTargetSceneManaged
+            )
+        }
+        TbrChip(
+            state = tbrState,
+            onClick = { onNavigate(NavigationRequest.Element(ElementType.TEMP_BASAL)) }
         )
     }
 }
