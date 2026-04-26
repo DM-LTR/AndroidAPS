@@ -4,6 +4,7 @@
     <string name="error_mustbe4hexadidits">Must be 4 characters of ABCDEF0123456789</string>
     <!--    General-->
     <string name="treatments">Treatments</string>
+    <string name="treatments_history">Treatments history</string>
     <string name="treatments_desc">View and manage treatment history</string>
     <string name="nav_configuration">Configuration</string>
     <string name="nav_configuration_desc">Setup your configuration (CGM, Pump, ...) end enable features</string>
@@ -131,7 +132,6 @@
     <string name="disabled_loop">Disabled loop</string>
     <string name="resumeloop">Resume loop</string>
     <string name="suspendloop">Suspend loop</string>
-    <string name="duration_min_label">Duration [min]</string>
     <string name="notification">Notification</string>
     <string name="noprofile">No profile loaded from NS yet</string>
     <string name="exists">exists</string>
@@ -290,11 +290,11 @@
     <string name="careportal_question_message">Question : %1$s</string>
     <string name="careportal_exercise_message">Exercise : %1$s</string>
     <string name="careportal_pump_site_change">Pump Site Change</string>
-    <string name="cgm_sensor_insert">CGM Sensor Insert</string>
+    <string name="cgm_sensor_insert">Sensor Insert</string>
     <string name="careportal_pump_site_management">Pump Sites</string>
     <string name="careportal_cgm_site_management">CGM Sites</string>
-    <string name="careportal_cgmsensorstart">CGM Sensor Start</string>
-    <string name="careportal_cgm_sensor_stop">CGM Sensor Stop</string>
+    <string name="careportal_cgmsensorstart">Sensor Start</string>
+    <string name="careportal_cgm_sensor_stop">Sensor Stop</string>
     <string name="careportal_dad_alert">D.A.D. Alert</string>
     <string name="careportal_insulin_cartridge_change">Insulin Cartridge Change</string>
     <string name="careportal_profileswitch">Profile switch</string>
@@ -330,7 +330,7 @@
     <string name="scene_action_loop_mode">Loop mode: %1$s</string>
     <string name="scene_action_careportal">Log: %1$s</string>
     <string name="scene_time_remaining">%1$s remaining</string>
-    <string name="scene_management">Scene management</string>
+    <string name="scene_management">Scenes</string>
     <string name="scene_management_desc">Create, edit, and manage scenes</string>
     <string name="scene_action_count">%1$d actions</string>
     <string name="scene_start_from_template">Start from template</string>
@@ -660,7 +660,6 @@
     <string name="bolus_advisor_message">You have high glycemia. Instead of eating now it\'s recommended to wait for better glycemia. Do you want to do a correction bolus now and remind you when it\'s time to eat? In this case no carbs will be recorded and you must use wizard again when we remind you.</string>
 
     <string name="cobvsiob">COB vs IOB</string>
-    <string name="slowabsorptiondetected"><![CDATA[<font color=\'%1$s\'>!!!!! Slow carbs absorption detected: %2$d%% of time. Double check your calculation. COB can be overestimated thus more insulin could be given !!!!!</font>]]></string>
     <string name="slowabsorptiondetected_plain">!!!!! Slow carbs absorption detected: %1$d%% of time. Double check your calculation. COB can be overestimated thus more insulin could be given !!!!!</string>
     <string name="bolus_constraint_applied_warn">Bolus constraint applied: %1$.2f U to %2$.2f U</string>
     <string name="bolus_recorded_only">Bolus will be recorded only (not delivered by pump)</string>
@@ -873,7 +872,7 @@
     <string name="nav_exit">Exit</string>
     <string name="open_navigation">Open navigation</string>
     <string name="nav_history_browser">History browser</string>
-    <string name="nav_history_browser_desc">Browse historical data and graphs</string>
+    <string name="nav_history_browser_desc">Browse historical graphs</string>
     <string name="appearance">Appearance</string>
     <string name="manage">Manage</string>
     <string name="localprofile">Profile</string>
