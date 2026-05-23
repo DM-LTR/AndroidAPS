@@ -13,7 +13,9 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequest
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import app.aaps.core.data.model.HR
 import app.aaps.core.data.model.HasIDs
+import app.aaps.core.data.model.SC
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.configuration.Config
@@ -26,14 +28,13 @@ import app.aaps.core.interfaces.logging.UserEntryLogger
 import app.aaps.core.interfaces.nsclient.NSAlarm
 import app.aaps.core.interfaces.nsclient.NSClientRepository
 import app.aaps.core.interfaces.nsclient.StoreDataForDb
-import app.aaps.core.interfaces.plugin.ActivePlugin
 import app.aaps.core.interfaces.plugin.PluginBaseWithPreferences
 import app.aaps.core.interfaces.plugin.PluginDescription
 import app.aaps.core.interfaces.profile.Profile
+import app.aaps.core.interfaces.profile.ProfileRepository
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventAppExit
-import app.aaps.core.interfaces.rx.events.EventProfileStoreChanged
 import app.aaps.core.interfaces.rx.events.EventSWSyncStatus
 import app.aaps.core.interfaces.source.NSClientSource
 import app.aaps.core.interfaces.sync.DataSyncSelector
@@ -85,6 +86,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.runBlocking
@@ -112,7 +114,7 @@ class NSClientV3Plugin @Inject constructor(
     private val l: L,
     private val nsClientRepository: NSClientRepository,
     private val uel: UserEntryLogger,
-    private val activePlugin: ActivePlugin,
+    private val profileRepository: ProfileRepository
 ) : NsClient, Sync, PluginBaseWithPreferences(
     PluginDescription()
         .mainType(PluginType.SYNC)
@@ -206,7 +208,7 @@ class NSClientV3Plugin @Inject constructor(
         }
     }
 
-    override fun onStart() {
+    override suspend fun onStart() {
         super.onStart()
         handler = Handler(HandlerThread(this::class.simpleName + "Handler").also { it.start() }.looper)
 
@@ -257,9 +259,11 @@ class NSClientV3Plugin @Inject constructor(
         preferences.observe(LongNonKey.LocalProfileLastChange).drop(1)
             .onEach { executeUpload("PROFILE_CHANGE", forceNew = true) }.launchIn(scope)
         persistenceLayer.observeAnyChange()
+            // HR/SC writes come from the watch; this plugin doesn't upload them — skip to avoid reconnect-flush storm.
+            .filter { types -> types.any { it != HR::class && it != SC::class } }
             .onEach { types -> executeUpload("DB_CHANGED(${types.joinToString { it.simpleName ?: "?" }})", forceNew = false) }.launchIn(scope)
-        rxBus.toFlow(EventProfileStoreChanged::class.java)
-            .onEach { executeUpload("EventProfileStoreChanged", forceNew = false) }.launchIn(scope)
+        profileRepository.profile.drop(1)
+            .onEach { executeUpload("profileRepository.profile changed", forceNew = false) }.launchIn(scope)
 
         runLoop = Runnable {
             var refreshInterval = T.mins(5).msecs()
@@ -298,7 +302,7 @@ class NSClientV3Plugin @Inject constructor(
         }
     }
 
-    override fun onStop() {
+    override suspend fun onStop() {
         handler?.removeCallbacksAndMessages(null)
         handler?.looper?.quit()
         handler = null
