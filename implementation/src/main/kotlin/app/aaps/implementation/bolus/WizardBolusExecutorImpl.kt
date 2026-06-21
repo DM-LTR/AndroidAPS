@@ -246,7 +246,15 @@ class WizardBolusExecutorImpl @Inject constructor(
             insulin = wizard.calculatedTotalInsulin,
             carbs = wizard.carbs,
             bolusId = wizard.timeStamp,
-            lines = wizard.buildConfirmationLines(advisor = false),
+            // Pass the eCarbs split (food type → extended carbs) so the delivery confirmation shows the eCarbs line too —
+            // the record-only path already does this via getConfirmationSummary(). Advisor = correction-only ("eat later"),
+            // so eCarbs don't apply there.
+            lines = wizard.buildConfirmationLines(
+                advisor = false,
+                eCarbsGrams = inputs.eCarbsGrams,
+                eCarbsDelayMinutes = inputs.eCarbsDelayMinutes,
+                eCarbsDurationHours = inputs.eCarbsDurationHours
+            ),
             advisorApplies = advisorApplies,
             advisorLines = if (advisorApplies) wizard.buildConfirmationLines(advisor = true) else emptyList()
         )
@@ -351,8 +359,10 @@ class WizardBolusExecutorImpl @Inject constructor(
         // client gets an error instead of a silent no-op at confirm (the batch confirm path has no per-action failure channel).
         if (ia != null && profileFunction.getProfile() !is ProfileSealed.EPS)
             return WizardBolusExecutor.PrepareResult.Error(rh.gs(R.string.no_profile_set))
-        if (insulin <= 0.0 && carbs <= 0 && tt == null && ps == null && rm == null && tb == null && eb == null && ctb == null && ceb == null && ia == null)
-            return WizardBolusExecutor.PrepareResult.Error(rh.gs(R.string.no_action_selected))
+        if (insulin <= 0.0 && carbs == 0 && tt == null && ps == null && rm == null && tb == null && eb == null && ctb == null && ceb == null && ia == null)
+            // Nothing to do after caps/clamps (e.g. negative carbs with no COB to remove): a no-op, NOT a delivery
+            // error — the caller renders the neutral "no action selected" message, never the bolus-error title.
+            return WizardBolusExecutor.PrepareResult.NoAction
         val bolusId = dateUtil.now()
         evictStalePending()
         pending[bolusId] = PendingBolus(
@@ -422,10 +432,11 @@ class WizardBolusExecutorImpl @Inject constructor(
                     )
                 }
 
-                p.insulin == 0.0 && p.carbs > 0 ->
-                    // Carbs-only: funnel through the SAME eCarbs path the local Carbs dialog uses, so a client carb
-                    // entry and a master carb entry are identical (TE.Type, duration, delay) — not the generic deliver()
-                    // which would tag it CARBS_CORRECTION instead of deliverECarbs's CORRECTION_BOLUS convention.
+                p.insulin == 0.0 && p.carbs != 0 ->
+                    // Carbs-only (positive add OR negative COB removal): funnel through the SAME eCarbs path the local
+                    // Carbs dialog uses, so a client carb entry and a master carb entry are identical (TE.Type, duration,
+                    // delay) — not the generic deliver() which would tag it CARBS_CORRECTION instead of deliverECarbs's
+                    // CORRECTION_BOLUS convention.
                     deliverECarbs(p.carbs, dateUtil.now() + T.mins(p.carbTimeMinutes.toLong()).msecs(), p.carbsDurationHours, p.carbTimeMinutes, notes, source, wrapped)
 
                 else                            -> {
@@ -519,14 +530,18 @@ class WizardBolusExecutorImpl @Inject constructor(
         return Triple(cappedInsulin, cappedCarbs, eventType)
     }
 
-    /** Negative carbs = COB removal: clamp so we never remove more than the master's CURRENT COB, and drop a back-dated removal (matches the Carbs dialog, now on the master). */
-    private fun clampNegativeCarbs(carbs: Int, carbsTimeOffsetMinutes: Int): Int {
+    /**
+     * Negative carbs = COB removal. Two invariants (mirrored by the Carbs dialog UI, re-enforced here as the master is
+     * the authority + TOCTOU/relayed-client safety net): never remove more than the CURRENT COB (so COB can't be driven
+     * to a misleading 0-by-overshoot), and never remove in the FUTURE (you can't pre-remove carbs not yet on board, and
+     * `getCobInfo.futureCarbs` isn't floored — a future negative would render negative future COB). A back-dated removal
+     * stays allowed: the COB integration re-floors the past correctly.
+     */
+    private suspend fun clampNegativeCarbs(carbs: Int, carbsTimeOffsetMinutes: Int): Int {
         if (carbs >= 0) return carbs
-        val cob = iobCobCalculator.ads.getLastAutosensData("prepareBatch", aapsLogger, dateUtil)?.cob ?: 0.0
-        var c = carbs
-        if (c < -cob) c = ceil(-cob).toInt()
-        if (carbsTimeOffsetMinutes != 0) c = 0
-        return c
+        if (carbsTimeOffsetMinutes > 0) return 0 // future removal is not allowed → no-op
+        val cob = iobCobCalculator.getCobInfo("prepareBatch").displayCob ?: 0.0
+        return if (carbs < -cob) ceil(-cob).toInt() else carbs // cap magnitude to current COB
     }
 
     /** Apply a batch TempTarget via the dialog-free domain path (mirrors onVerifiedTempTargetSet). */
@@ -572,7 +587,7 @@ class WizardBolusExecutorImpl @Inject constructor(
                 out += ConfirmationLine(ConfirmationRole.WARNING, rh.gs(R.string.bolus_constraint_applied_warn, bolus.insulin, insulin))
             }
         }
-        if (carbs > 0) {
+        if (carbs != 0) {
             out += ConfirmationLine(ConfirmationRole.CARBS, rh.gs(R.string.confirmation_line, rh.gs(R.string.carbs), rh.gs(R.string.format_carbs, carbs)))
             if (!recordOnly && carbs != bolus.carbs)
                 out += ConfirmationLine(ConfirmationRole.WARNING, rh.gs(R.string.constraint_applied))
