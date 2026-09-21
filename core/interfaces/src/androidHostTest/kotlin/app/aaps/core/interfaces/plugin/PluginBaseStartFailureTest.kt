@@ -13,7 +13,10 @@ import app.aaps.core.interfaces.resources.TextResolver
 import app.aaps.core.keys.interfaces.TextRef
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +26,8 @@ import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.mockito.kotlin.mock
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -38,10 +43,15 @@ class PluginBaseStartFailureTest {
     /** Records what was posted instead of mocking it, so the level and the sound can be asserted. */
     private class RecordingNotifications : NotificationManager {
 
-        data class Posted(val id: NotificationId, val level: NotificationLevel, val sound: AlarmSound?)
+        data class Posted(val id: NotificationId, val text: String, val level: NotificationLevel, val sound: AlarmSound?, val handle: NotificationHandle)
 
         val posted = mutableListOf<Posted>()
         val dismissed = mutableListOf<NotificationId>()
+        val dismissedHandles = mutableListOf<NotificationHandle>()
+
+        /** What is still on screen: posted, minus anything dismissed by id or by handle. */
+        val live: List<Posted>
+            get() = posted.filterNot { it.id in dismissed || it.handle in dismissedHandles }
 
         override val notifications: StateFlow<List<AapsNotification>> = MutableStateFlow(emptyList())
 
@@ -55,10 +65,7 @@ class PluginBaseStartFailureTest {
             sound: AlarmSound?,
             actions: List<NotificationAction>,
             validityCheck: (() -> Boolean)?
-        ): NotificationHandle {
-            posted += Posted(id, level, sound)
-            return NotificationHandle(posted.size)
-        }
+        ): NotificationHandle = record(id, text, level, sound)
 
         override fun post(
             id: NotificationId,
@@ -69,10 +76,7 @@ class PluginBaseStartFailureTest {
             sound: AlarmSound?,
             actions: List<NotificationAction>,
             validityCheck: (() -> Boolean)?
-        ): NotificationHandle {
-            posted += Posted(id, level, sound)
-            return NotificationHandle(posted.size)
-        }
+        ): NotificationHandle = record(id, text, level, sound)
 
         override fun post(
             id: NotificationId,
@@ -84,25 +88,47 @@ class PluginBaseStartFailureTest {
             sound: AlarmSound?,
             actions: List<NotificationAction>,
             validityCheck: (() -> Boolean)?
-        ): NotificationHandle {
-            posted += Posted(id, level, sound)
-            return NotificationHandle(posted.size)
+        ): NotificationHandle = record(id, "ref", level, sound)
+
+        private var nextKey = 10_000
+
+        /**
+         * Mirrors `CommonNotificationManager.postInternal`, and the mirroring is the point: without
+         * [NotificationId.allowMultiple] the real manager keys the card by `id.ordinal` and REPLACES any
+         * card already carrying that id. A fake that always hands out a fresh handle would make this test
+         * pass against the very bug it exists to catch.
+         */
+        private fun record(id: NotificationId, text: String, level: NotificationLevel, sound: AlarmSound?): NotificationHandle {
+            val handle: NotificationHandle
+            if (id.allowMultiple) {
+                handle = NotificationHandle(nextKey++)
+            } else {
+                handle = NotificationHandle(id.ordinal)
+                posted.removeAll { it.id == id }
+            }
+            posted += Posted(id, text, level, sound, handle)
+            return handle
         }
 
         override fun dismiss(id: NotificationId) {
             dismissed += id
         }
 
-        override fun dismiss(handle: NotificationHandle) {}
+        override fun dismiss(handle: NotificationHandle) {
+            dismissedHandles += handle
+        }
 
         override fun muteAllAlarms() {}
     }
 
-    /** A mock would hand back null for [TextResolver.gs], and the notification text may not be null. */
+    /**
+     * A mock would hand back null for [TextResolver.gs], and the notification text may not be null.
+     * The arguments are kept in the result so a test can tell which plugin a card is about.
+     */
     private class FixedText : TextResolver {
 
         override fun gs(ref: TextRef): String = "text"
-        override fun gs(ref: TextRef, vararg args: Any?): String = "text"
+        override fun gs(ref: TextRef, vararg args: Any?): String = "failed: " + args.joinToString()
         override fun gsNotLocalised(ref: TextRef): String = "text"
         override fun shortTextMode(): Boolean = false
     }
@@ -110,7 +136,8 @@ class PluginBaseStartFailureTest {
     private class TestPlugin(
         aapsLogger: AAPSLogger,
         rh: TextResolver,
-        notificationManager: NotificationManager
+        notificationManager: NotificationManager,
+        override val name: String = "Test plugin"
     ) : PluginBase(PluginDescription().mainType(PluginType.GENERAL), aapsLogger, rh, notificationManager) {
 
         var failStart = false
@@ -119,25 +146,31 @@ class PluginBaseStartFailureTest {
         /** Set to hold [onStart] open, so "scheduled" and "finished" can be told apart. */
         var startGate: CompletableDeferred<Unit>? = null
 
+        /** Called at the top of both phases, so a test can detect two of them running at once. */
+        var onPhaseEnter: (() -> Unit)? = null
+
         val events = mutableListOf<String>()
 
         override suspend fun onStart() {
+            onPhaseEnter?.invoke()
             startGate?.await()
             events += "start"
             if (failStart) throw IllegalStateException("onStart boom")
         }
 
         override suspend fun onStop() {
+            onPhaseEnter?.invoke()
             events += "stop"
             if (failStop) throw IllegalStateException("onStop boom")
         }
 
-        /** [pluginScope] is protected, and this is what the drivers do with it. */
+        /** [pluginScope] is protected, and this is what the drivers do with it. No handler here on purpose:
+         * the one on [pluginScope] is what is being tested. */
         fun launchOwnWork(block: suspend () -> Unit): Job = pluginScope.launch { block() }
     }
 
     private val notifications = RecordingNotifications()
-    private fun plugin() = TestPlugin(mock<AAPSLogger>(), FixedText(), notifications)
+    private fun plugin(name: String = "Test plugin") = TestPlugin(mock<AAPSLogger>(), FixedText(), notifications, name)
 
     @Test
     fun `a failing onStart does not throw out of the transition`() = runBlocking {
@@ -195,11 +228,30 @@ class PluginBaseStartFailureTest {
 
         // Ends on a void-returning assertion on purpose: a `runBlocking` test whose last expression has a
         // value is not void, and JUnit 5 skips it without a word. `containsExactly` returns `Ordered`.
-        assertThat(notifications.dismissed).containsExactly(NotificationId.PLUGIN_START_FAILED)
+        assertThat(notifications.live).isEmpty()
         assertThat(sut.lastStartFailed).isFalse()
     }
 
-    /** Nothing is dismissed when there was no failure, so a plugin cannot clear another one's card. */
+    /**
+     * By handle, never by id. `dismiss(id)` removes every card carrying that id, and
+     * [NotificationId.PLUGIN_START_FAILED] is shared by every plugin - see the two-plugin test below.
+     */
+    @Test
+    fun `a clean start dismisses its own card by handle`() = runBlocking {
+        val sut = plugin()
+        sut.failStart = true
+        withTimeout(5.seconds) { sut.setPluginEnabledAwaiting(PluginType.GENERAL, true) }
+        val card = notifications.posted.single().handle
+
+        sut.failStart = false
+        withTimeout(5.seconds) { sut.setPluginEnabledAwaiting(PluginType.GENERAL, false) }
+        withTimeout(5.seconds) { sut.setPluginEnabledAwaiting(PluginType.GENERAL, true) }
+
+        assertThat(notifications.dismissedHandles).containsExactly(card)
+        assertThat(notifications.dismissed).isEmpty()
+    }
+
+    /** Nothing is dismissed when this plugin never failed. */
     @Test
     fun `a clean start dismisses nothing when nothing had failed`() = runBlocking {
         val sut = plugin()
@@ -207,6 +259,39 @@ class PluginBaseStartFailureTest {
         withTimeout(5.seconds) { sut.setPluginEnabledAwaiting(PluginType.GENERAL, true) }
 
         assertThat(notifications.dismissed).isEmpty()
+        assertThat(notifications.dismissedHandles).isEmpty()
+    }
+
+    /**
+     * The one that matters, and the one the first version of this file got wrong.
+     *
+     * `ConfigBuilderImpl` and `PluginStore` start every elected plugin in the same pass, so a systemic cause
+     * - a revoked Bluetooth permission, say - takes down more than one. Each failure must keep its own card,
+     * and a plugin that recovers must not take down the alarm of one that has not.
+     */
+    @Test
+    fun `two failed plugins keep separate cards and one recovering leaves the other's alone`() = runBlocking {
+        val pump = plugin("Pump driver")
+        val bgSource = plugin("BG source")
+        pump.failStart = true
+        bgSource.failStart = true
+
+        withTimeout(5.seconds) { pump.setPluginEnabledAwaiting(PluginType.GENERAL, true) }
+        withTimeout(5.seconds) { bgSource.setPluginEnabledAwaiting(PluginType.GENERAL, true) }
+
+        // Two failures, two cards, each naming its own plugin.
+        assertThat(notifications.live.map { it.text }).containsExactly("failed: Pump driver", "failed: BG source")
+
+        // The BG source is fixed and restarted; the pump is still broken.
+        bgSource.failStart = false
+        withTimeout(5.seconds) { bgSource.setPluginEnabledAwaiting(PluginType.GENERAL, false) }
+        withTimeout(5.seconds) { bgSource.setPluginEnabledAwaiting(PluginType.GENERAL, true) }
+
+        assertThat(pump.lastStartFailed).isTrue()
+        assertThat(bgSource.lastStartFailed).isFalse()
+        // The pump's alarm survives. Losing it would leave a pump that refuses to dose and says nothing.
+        // isEqualTo, not containsExactly: the latter returns Ordered, which would make JUnit skip this test.
+        assertThat(notifications.live.single().text).isEqualTo("failed: Pump driver")
     }
 
     /**
@@ -254,9 +339,6 @@ class PluginBaseStartFailureTest {
      * The other half of the same problem, and the reason [PluginBase.pluginScope] carries a supervisor job:
      * with a plain job the first failing child cancelled the scope for good, and every later `launch` on it
      * was a no-op that said nothing. The drivers launch their polling and their queue work there.
-     *
-     * The failing child prints a stack trace to stderr - that is the default handler doing its job, not the
-     * test failing.
      */
     @Test
     fun `work the plugin launched that fails does not kill the plugin scope`() = runBlocking {
@@ -267,6 +349,70 @@ class PluginBaseStartFailureTest {
         withTimeout(5.seconds) { sut.launchOwnWork { ran = true }.join() }
 
         assertThat(ran).isTrue()
+    }
+
+    /**
+     * The other half: the scope surviving is not enough if the failure is silent.
+     *
+     * Without a handler on [PluginBase.pluginScope] the throw reaches the thread's default handler, which
+     * on Android ends the process - and in a test JVM it is collected by kotlinx-coroutines-test and
+     * reported against an unrelated `runTest` somewhere else in the module, which is how this file first
+     * broke `ChunkedOnQuietPeriodTest` on CI.
+     */
+    @Test
+    fun `work the plugin launched that fails is reported, not lost`() = runBlocking {
+        val sut = plugin("Pump driver")
+
+        withTimeout(5.seconds) { sut.launchOwnWork { throw IllegalStateException("child boom") }.join() }
+
+        val card = notifications.live.single()
+        assertThat(card.id).isEqualTo(NotificationId.PLUGIN_WORK_FAILED)
+        assertThat(card.text).isEqualTo("failed: Pump driver")
+        assertThat(card.level).isEqualTo(NotificationLevel.URGENT)
+        assertThat(card.sound).isEqualTo(AlarmSound.ALARM)
+        // It did NOT start badly - that is a different state, and the pump gate must not be tripped by this.
+        assertThat(sut.lastStartFailed).isFalse()
+    }
+
+    /** Repeated failures replace this plugin's own card rather than piling up. */
+    @Test
+    fun `repeated launched-work failures leave one card`() = runBlocking {
+        val sut = plugin()
+
+        withTimeout(5.seconds) { sut.launchOwnWork { throw IllegalStateException("one") }.join() }
+        withTimeout(5.seconds) { sut.launchOwnWork { throw IllegalStateException("two") }.join() }
+
+        assertThat(notifications.live).hasSize(1)
+    }
+
+    /**
+     * Two threads flipping the same plugin must not produce two transitions that overlap.
+     *
+     * `schedule` reads the previous transition and then writes its own, and a `@Volatile` alone makes each
+     * half visible without making the pair atomic: both callers read the same predecessor, both queue
+     * behind it, and both run at once - which is the single thing the queueing exists to prevent.
+     * `ConfigBuilderImpl` disables several plugins and enables one in the same pass, so it is reachable.
+     */
+    @Test
+    fun `concurrent enable and disable do not overlap`() = runBlocking {
+        repeat(40) {
+            val sut = plugin()
+            val inPhase = AtomicInteger(0)
+            val overlapped = AtomicBoolean(false)
+            sut.onPhaseEnter = {
+                if (inPhase.incrementAndGet() > 1) overlapped.set(true)
+                Thread.sleep(1)          // widen the window a real phase would occupy
+                inPhase.decrementAndGet()
+            }
+
+            val jobs = listOf(
+                async(Dispatchers.Default) { sut.setPluginEnabled(PluginType.GENERAL, true) },
+                async(Dispatchers.Default) { sut.setPluginEnabled(PluginType.GENERAL, false) }
+            ).awaitAll()
+
+            withTimeout(5.seconds) { jobs.filterNotNull().forEach { it.join() } }
+            assertThat(overlapped.get()).isFalse()
+        }
     }
 
     /**

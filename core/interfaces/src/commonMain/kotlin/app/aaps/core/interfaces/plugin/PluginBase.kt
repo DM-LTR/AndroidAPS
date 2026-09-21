@@ -2,9 +2,12 @@ package app.aaps.core.interfaces.plugin
 
 import app.aaps.core.data.plugin.PluginType
 import app.aaps.core.interfaces.InterfacesStrings
+import app.aaps.core.interfaces.concurrent.AapsLock
+import app.aaps.core.interfaces.concurrent.withLock
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
 import app.aaps.core.interfaces.notifications.AlarmSound
+import app.aaps.core.interfaces.notifications.NotificationHandle
 import app.aaps.core.interfaces.notifications.NotificationId
 import app.aaps.core.interfaces.notifications.NotificationManager
 import app.aaps.core.interfaces.resources.TextResolver
@@ -32,14 +35,35 @@ abstract class PluginBase(
 ) {
 
     /**
-     * Work the plugin starts. Unchanged for now, and still never cancelled - making it per-enable
-     * changes what 14 existing `pluginScope.launch` calls mean, with no compile error, and several of
-     * them queue pump commands. That is its own change with its own review.
+     * Work the plugin starts. Process-lifetime, and never cancelled. That is a settled decision, not a
+     * gap waiting to be closed.
+     *
+     * Making it per-enable was proposed and rejected once the 14 `pluginScope.launch` calls were written
+     * down one by one - see `PluginLifetimeWorkScanTest.pluginScopeLaunches`, which fails the build on a
+     * new one. The reason it was rejected: cancelling this scope does NOT withdraw a queued command.
+     * `CommandQueueImplementation.readStatus` is `add` then `notifyAboutNewCommand` then
+     * `deferred.await()`, so cancelling the caller at the await leaves the command in the queue and still
+     * running - it only throws away the answer. Twelve of the fourteen sites are status reads whose result
+     * can be abandoned safely; `PumpPluginBase.onStart` already cancels its own job explicitly, which is
+     * the only place cancelling really prevents anything; and `OmnipodDashPumpPlugin.handleCommandConfirmation`
+     * must NOT be cancelled at all, because it delivers a basal correction the pod asked for and the result
+     * is the only record that it worked.
+     *
+     * If a stopping driver must stop being driven, the command has to leave the QUEUE. That is a queue
+     * change, and this scope is the wrong lever for it.
      *
      * [SupervisorJob], though, because a plain `Job` made one failing child kill the scope for good and
      * every later launch on it a silent no-op.
+     *
+     * And a handler, because without one a throw here reaches the thread's default handler, which on
+     * Android ends the process. The supervisor job only saved the scope; the app still died. Roughly fifteen
+     * `pluginScope.launch` calls across the pump drivers queue pump commands, so this is reachable from a
+     * failing pump.
      */
-    protected val pluginScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    protected val pluginScope = CoroutineScope(
+        Dispatchers.Default + SupervisorJob() +
+            CoroutineExceptionHandler { _, e -> onLaunchedWorkFailed(e) }
+    )
 
     /**
      * Runs [onStart] / [onStop], and nothing else.
@@ -67,8 +91,56 @@ abstract class PluginBase(
     var lastStartFailed: Boolean = false
         private set
 
-    /** The previous transition. Start and stop of one plugin must not run at the same time. */
+    /**
+     * The card [runPhase] posted for this plugin's own failure, so it can take back that one and no other.
+     *
+     * [NotificationId.PLUGIN_START_FAILED] is shared by every plugin, and `dismiss(id)` removes every card
+     * carrying it. Dismissing by id here would mean one plugin starting cleanly clears the alarm of another
+     * that is still broken, while its [lastStartFailed] stays set - a pump that quietly refuses to dose with
+     * nothing on screen to say why.
+     */
+    @Volatile
+    private var startFailureCard: NotificationHandle? = null
+
+    /** Same idea for [pluginScope], so one plugin failing over and over leaves one card, not a pile. */
+    @Volatile
+    private var workFailureCard: NotificationHandle? = null
+
+    /**
+     * Work this plugin launched on [pluginScope] ended with an error.
+     *
+     * Nothing can be undone from here - the coroutine is gone and only the plugin knows what it was doing -
+     * so the job is to make sure it is not lost. Not routed through [lastStartFailed]: the plugin did start,
+     * and a pump that started and then lost a polling loop is a different state from one that never came up.
+     */
+    private fun onLaunchedWorkFailed(e: Throwable) {
+        // The throwable goes to the log only. It is developer text, untranslated, and can be a page long.
+        aapsLogger.error(LTag.CORE, "Work launched by $name failed", e)
+        workFailureCard?.let { notificationManager.dismiss(it) }
+        workFailureCard = notificationManager.post(
+            NotificationId.PLUGIN_WORK_FAILED,
+            rh.gs(InterfacesStrings.plugin_work_failed, name),
+            validMinutes = 0,
+            sound = AlarmSound.ALARM
+        )
+    }
+
+    /**
+     * The previous transition. Start and stop of one plugin must not run at the same time.
+     *
+     * Guarded by [transitionLock] rather than only [Volatile]: [schedule] reads this and then writes it,
+     * and volatile alone makes each half visible without making the pair atomic - two callers arriving
+     * together would both read the same predecessor and queue behind it, running concurrently. That is
+     * the one thing the queueing exists to prevent, and it is reachable: `ConfigBuilderImpl` disables
+     * several plugins and enables one in the same pass.
+     */
     private var lastTransition: Job? = null
+
+    /**
+     * Guards the read-then-write of [lastTransition]. Its own object, never reassigned - locking on
+     * something that gets replaced lets a second thread lock the new one and walk straight in.
+     */
+    private val transitionLock = AapsLock()
 
     enum class State {
         NOT_INITIALIZED, ENABLED, DISABLED
@@ -179,7 +251,7 @@ abstract class PluginBase(
      * otherwise wedge this plugin's lifecycle for the rest of the process. After [TRANSITION_WAIT] the new
      * transition goes ahead anyway and says so in the log: overlapping is bad, never starting again is worse.
      */
-    private fun schedule(starting: Boolean): Job {
+    private fun schedule(starting: Boolean): Job = transitionLock.withLock {
         val previous = lastTransition
         val job = lifecycleScope.launch {
             if (previous != null && previous.isActive) {
@@ -189,7 +261,7 @@ abstract class PluginBase(
             runPhase(starting)
         }
         lastTransition = job
-        return job
+        job
     }
 
     /**
@@ -203,10 +275,11 @@ abstract class PluginBase(
         try {
             if (starting) {
                 onStart()
-                // A clean start clears both the flag and the card from the previous failure.
+                // A clean start clears both the flag and this plugin's own card from the previous failure.
                 if (lastStartFailed) {
                     lastStartFailed = false
-                    notificationManager.dismiss(NotificationId.PLUGIN_START_FAILED)
+                    startFailureCard?.let { notificationManager.dismiss(it) }
+                    startFailureCard = null
                 }
             } else {
                 onStop()
@@ -219,7 +292,9 @@ abstract class PluginBase(
             aapsLogger.error(LTag.CORE, "${if (starting) "onStart" else "onStop"} failed: $name", e)
             if (starting) {
                 lastStartFailed = true
-                notificationManager.post(
+                // Replace this plugin's own previous card, so repeated failed starts do not stack up.
+                startFailureCard?.let { notificationManager.dismiss(it) }
+                startFailureCard = notificationManager.post(
                     NotificationId.PLUGIN_START_FAILED,
                     rh.gs(InterfacesStrings.plugin_start_failed, name),
                     validMinutes = 0,
