@@ -94,6 +94,19 @@ Non-goals:
      through `.key`, for example
      `sp.getInt(CarelevoIntPreferenceKey.CARELEVO_PATCH_EXPIRATION_REMINDER_HOURS.key, 0)`. ComboV2
      does the same through `AAPSPumpStateStore`, `Delegates` and `ComboV2Plugin`.
+
+     **Order agreed 2026-09-22: CareLevo now, ComboV2 later with its own migration.** CareLevo is the
+     cheaper of the two and splits in half. The registered keys read raw
+     (`CarelevoBooleanPreferenceKey`, `CarelevoIntPreferenceKey` - already in `ownPreferences`, just
+     read through `sp.getX(Key.key, default)` instead of `preferences.get(Key)`) are a swap at about
+     seven call sites. The part that actually matters for 4.1 decision 4 is the OTHER half: seven raw
+     string constants in `PrefEnvConfig` - `carelevo_patch_info`, the four `*_infusion_info` keys,
+     `carelevo_user_setting_info`, `carelevo_alarm_info_list` - plus
+     `PREF_KEY_LAST_SNAPSHOT_ALARM_CAUSES` in `CarelevoPatch`. Those are registered nowhere, they hold
+     live patch and infusion state, and under the removal rule they look exactly like trash. They need
+     a `CarelevoStringNonKey` marked NOT exportable (they belong to this patch and this install), and
+     the DAOs routed through `Preferences`. Note `CarelevoInfusionInfoDaoImpl` keys by a computed
+     string per infusion mode, so that one needs a composed key rather than a plain entry.
    Nothing else. `ActiveSceneManager`, `ProfileRepositoryImpl`, `UnscentedKalmanFilterPlugin` and
    `MainApp` only name the type in a comment.
    **Why the two drivers are a prerequisite and not a tidy-up.** A raw read never sees
@@ -494,11 +507,36 @@ reloadFromStore is unsafe on today's sp.clear()").
 
 Each of these changes what gets built, and none of them is a coding question.
 
-1. **Does `kind` have a default?** `NonPreferenceKey.exportable` is `get() = true`, and that default
-   is exactly how the pump-state keys in 8.B became exportable without anyone typing it. A `kind`
-   with a default repeats that one level up, and the unsafe value (Setting) is again the natural
-   default. A `kind` with no default breaks every key enum at once and has to be filled in one pass.
-   Two very different pieces of work; phase 1 cannot start without the answer.
+1. ~~**Does `kind` have a default?**~~ **SETTLED 2026-09-22: YES, a default is allowed - and the work
+   goes into making the minority visible instead of into 287 hand-written declarations.** Miloš's
+   answer, and the measurement supports it: only **25 key entries** are `exportable = false` against
+   roughly 287 core entries, so the default is right about 91% of the time. Forcing every entry to
+   declare a kind, to catch the rest, is the worse trade.
+
+   **But the default is only safe with the check, and that check does not exist yet.** The earlier
+   reasoning here was that a default is how the 8.B pump-state keys became exportable with nobody
+   typing it. That is true, and the measurement says why it was not caught: 14 of the 25 opt-outs are
+   in `StringNonKey`, and the three pump-state keys sat in that same file **next to fourteen
+   neighbours that had the `false` they were missing**. Nothing ever showed which entries were wrong.
+   So the fix is not to remove the default, it is 8.D: **the snapshot must record `kind` per key, and
+   CI must fail on a change**, so a new key's classification lands in a reviewable diff and a flip from
+   device state back to setting cannot pass silently. That moves 8.D's snapshot item from "machinery"
+   to a **precondition of 4.2 step 2**, because decision 4 now makes a wrong kind mean the key is
+   DELETED on import, not merely exported wrongly.
+
+   **Where a whole family has one answer, put it on the interface, not on each enum.** Done for intent
+   keys on 2026-09-22: `IntentPreferenceKey` now declares `override val exportable: Boolean get() = false`,
+   because an intent key is an ACTION and there is no value to carry. All six implementations
+   (`IntentKey`, `ApsIntentKey`, `SmsIntentKey`, `XdripIntentKey`, `DanaIntentKey`, `DiaconnIntentKey`)
+   already wrote that in their constructor and agreed - but that was a convention repeated six times,
+   and a seventh enum leaving the line out would have inherited `true` from `NonPreferenceKey` and
+   become exportable while holding nothing. This also answers the sub-question below: intent keys need
+   no fourth `NotStored` kind declared per enum, because the kind follows from the type.
+
+   Note the shadowing rule when doing the same for `kind`: a constructor parameter default **wins over**
+   an interface getter (`StringNonKey` declares `override val exportable: Boolean = true` and shadows
+   the interface), so an interface default sets the fallback for enums that stay silent - it does not
+   override one that speaks.
 2. **What is the quiet point**, given that nothing can stop the loop between the temp basal and the
    SMB (8.A)? **HALF SETTLED AND BUILT; the other half is specified below and not built.**
 
@@ -744,8 +782,73 @@ Each of these changes what gets built, and none of them is a coding question.
 
    The consequence that must NOT be undone: for the length of the rewrite every preference reads as its
    default, safety limits included, which is why the window in decision 2 brackets it.
-5. **ComboV2: device state or pump configuration?** 3.1.3 and 3.1.4 say different things, and the
-   answer decides whether the restore checkbox can work at all (8.B).
+5. ~~**ComboV2: device state or pump configuration?** 3.1.3 and 3.1.4 say different things, and the
+   answer decides whether the restore checkbox can work at all (8.B).~~ **SETTLED 2026-09-22:
+   NEITHER. They are device state (`exportable = false`), and the checkbox stops being about the file
+   at all.**
+
+   **Why both sections were half right.** 3.1.3 said pump configuration because the keys live in
+   `pump/*` - a rule applied by module rather than by meaning. 3.1.4 said `exportable = false` because
+   the values are local - true, but it bundled that with "the commit write", which is a different
+   concern. Reading the eleven settles it: six are a **cryptographic pairing between THIS phone and
+   THAT pump** (`combov2-bt-address-key`, `combov2-nonce-key`, `combov2-cp-cipher-key`,
+   `combov2-pc-cipher-key`, `combov2-key-response-address-key`, `combov2-pump-id-key`) and five are
+   **what the pump is delivering right now** (`combov2-tbr-timestamp`, `-percentage`, `-duration`,
+   `-type`, `combov2-utc-offset`). Not one of them is a user preference. The real ComboV2 settings are
+   different keys in different enums - `ComboBooleanKey` (`AutomaticReservoirEntry`,
+   `AutomaticBatteryEntry`, `VerboseLogging`) and `ComboIntKey` (`DiscoveryDuration`) - and those stay
+   exportable and keep transferring as they do today.
+
+   **What 3.1.3's classification would have done.** Pump configuration means exported and applied when
+   the box is ticked, and 3.4 says the `beforeImport`/`afterImport` hooks go away. Together that makes
+   ticking the box overwrite the nonce, both ciphers, the BT address and the pump ID with another
+   phone's - the exact failure `AAPSPumpStateStore`'s KDoc was written to prevent, promoted to the
+   documented behaviour of a checkbox.
+
+   **The checkbox changes meaning, and this is the part worth keeping hold of.** Since the eleven never
+   enter the file, nothing from a file can overwrite them in either position. The only remaining
+   question is whether they are DELETED locally, so the box means "wipe my pump state too", not
+   "restore pump configuration from the file":
+   - **Full import (box on): destroy everything, pump state included.** The user re-pairs. That is an
+     acceptable risk (Miloš, 2026-09-22) because it is what they asked for, and "this replaces
+     everything" is a sentence a user can act on.
+   - **All except pump (box off): pump-owned keys are left untouched**, so pairing and delivery state
+     survive. The normal case.
+
+   A pairing was never restorable from a file anyway - the ciphers only match the pump that negotiated
+   them - so nothing of value is lost by refusing to try.
+
+   **It needs no new mechanism.** The eleven are ALREADY registered and ALREADY owned:
+   `ComboV2Plugin.ownPreferences` is `ComboIntKey + ComboBooleanKey + ComboStringNonKey +
+   ComboIntNonKey + ComboLongNonKey`, and the last three are exactly those eleven. So the preserve set
+   is computable from the graph, with no hand-kept list, exactly as 3.1.3 already hoped:
+
+       preserve = plugins.filter { it.getType() == PluginType.PUMP }
+                         .filterIsInstance<PluginBaseWithPreferences>()
+                         .flatMap { it.ownPreferences }
+
+   **Two ordering constraints. Getting either wrong ships a release that wipes pairings.**
+   - **`sp.clear()` must be replaced by the iteration in decision 4 BEFORE anything else changes.**
+     With `exportable = false` the eleven are not in the file, so a blanket clear destroys them with
+     nothing to restore them from - and a clear ignores the checkbox, so that happens in BOTH
+     positions. This is the concrete case that makes decision 4's iterate rule load bearing rather
+     than tidy.
+   - **ComboV2's `beforeImport` / `afterImport` may only be removed AFTER the preserve-by-owner rule
+     is in.** Those hooks are the only thing protecting the pairing from today's clear. 3.4 says they
+     go away; it does not say they go away second. They do.
+
+   **And it generalises past ComboV2.** 3.1.3's pump-configuration list has the same mixture for every
+   driver - `ErosStringNonPreferenceKey.PodState`/`ActiveBolus`, `DashStringNonPreferenceKey.PodState`,
+   `MedtrumIntNonKey.PumpState`/`CurrentSequenceNumber`/`SyncedSequenceNumber`,
+   `MedtrumLongNonKey.SessionToken`/`PatchId`, `EopatchStringNonKey.PatchState`. A session token or pod
+   state from another phone is no more restorable than a Combo nonce, and **none of those drivers has a
+   backup hook**. ComboV2 is the only one that noticed. So the day the preserve rule lands, those
+   drivers stop losing pod state on import - a fix they never had.
+
+   **One behaviour change to be aware of, accepted rather than overlooked.** Today a fresh install with
+   no pairing can adopt a pairing from an imported file (case 2 in `AAPSPumpStateStore`'s KDoc). With
+   `exportable = false` that stops. It arguably never really worked - the ciphers belong to a
+   negotiation this phone did not take part in - but anyone relying on it after a reinstall loses it.
 
 **Recommendations.** Written 2026-09-20, then stressed by three reviewers each (does it work against
 the code, does it make a pump user worse off, is the cost as stated) whose default answer was
@@ -776,12 +879,16 @@ They are still proposals - each needs a yes or a different answer.
 - The snapshot must record `kind` per key (8.D), and it has to ship **with** the classification in
   4.2 step 2, not later. 516 classifications with no check behind them is worse than a known gap,
   because a guard that is believed removes the reason to build the real one.
-- Two cases need an answer in the same pass: `IntentPreferenceKey` stores no value, so give it a
-  fourth kind (`NotStored`) rather than a classification the checker throws away; and
+- Two cases need an answer in the same pass. **The first is now done**: `IntentPreferenceKey` stores no
+  value, and rather than a fourth `NotStored` kind declared by each enum, the answer went on the
+  interface - `override val exportable: Boolean get() = false`, because the kind follows from the type
+  and nobody has to remember it. See decision 1. **The second is still open**:
   `BooleanComposedKey.ConfigBuilderEnabled` is one constant covering every plugin in the app, so it
-  cannot carry a single kind - see decision 4.
-- If the pass has to be staged, stage it with a shrinking allowlist of unclassified enums, never
-  with a default.
+  cannot carry a single kind - see decision 4, where the removal rule makes it sharper than it was.
+- ~~If the pass has to be staged, stage it with a shrinking allowlist of unclassified enums, never
+  with a default.~~ **Overtaken by decision 1**, which allows the default and puts the safety in 8.D's
+  snapshot instead. The allowlist idea is still the right way to stage anything that cannot take a
+  default at all.
 
 **2. Do not stop the loop and do not wait for it under the hold.** (3 of 3 refuted. The goal stands;
 the mechanism written first was a deadlock.)
@@ -882,6 +989,31 @@ survived unchanged. It needs neither phase 1 nor phase 2 and can be done now.)
   with the box unticked. Compute these keys in `:app` from the live plugin list (8.D needs the same
   exposure), mark the `PUMP` ones pump configuration and the rest setting, and call `storeSettings`
   once after the import so every plugin in this build has an explicit value.
+
+  **SETTLED 2026-09-22.** Take the split: `PUMP` keys are pump configuration, the rest are settings.
+  Miloš's reasoning, and it draws the line in the right place - **losing the pump SELECTION is
+  acceptable, losing the pump CONFIGURATION is not.** The user re-picks the driver and it has to come
+  back working, so what must survive an import is the driver's own keys, not the tick that says which
+  driver is on.
+
+  Two things follow, and they are why 4.1 decision 4's preconditions are not optional:
+  - **Every pump driver's own keys must be classified as pump configuration.** Otherwise an
+    aapsclient export - which has no pump modules, so those keys are absent from the file - removes
+    them under the removal rule, and re-picking the driver gives a driver with no pairing, no serial
+    and no settings. Selection restored, configuration gone, which is the one outcome ruled out.
+  - **CareLevo and ComboV2 must be off the raw store**, or their keys are not registered at all, look
+    like trash, and go the same way.
+
+  **And the fallback must say so.** `verifySelectionInCategories` does not leave the category empty -
+  it calls `getDefaultPlugin(PUMP)` and `setPluginEnabled(PUMP, true)`, so it actively enables
+  `VirtualPumpPlugin`: a pump that accepts every command and reports success while delivering
+  nothing. "The user switches back" assumes the user looks. So an import that ends with no pump
+  selected **must raise a notification saying what happened and naming the pump that is now active**,
+  the same treatment a failed plugin start already gets. Agreed 2026-09-22.
+
+  Worth recording the tension this exposes: `PluginStore` forbids falling back to a default plugin
+  when READING - the standing doctrine - while `verifySelectionInCategories` does exactly that when
+  ELECTING. The notification is what stops the election-time fallback being silent.
 - Split by phase: "and every pump-configuration key when the box is ticked" belongs with the
   checkbox in 4.2 step 5. **Phase 3 must keep writing the file's pump keys exactly as today**, or a
   fresh-phone restore comes back with no pump configured for two whole phases. The plan has to state
@@ -984,11 +1116,52 @@ allowed; shipping 3 before 1 and 2 is not.
 
 ## 5. Bugs to fix on the way
 
-1. `doMigrations` step 3 writes `ConfigBuilder_APS_OpenAPSSMB_Enabled`; step 8 turns it into
-   `ConfigBuilder_Enabled_APS_OpenAPSSMB`, but `ConfigBuilderImpl.composedKeyFor` reads
-   `APS_OpenAPSSMBPlugin`. The key is never read (since January 2024).
-2. Step 11 deletes the DIA keys before `dataMigrations` uses them; a crash in between loses them.
-3. The key-moving loops use `value as Long` / `as Boolean`; one odd value aborts the startup.
+1. **FIXED, 2026-09-22.** `doMigrations` wrote the raw key `ConfigBuilder_APS_OpenAPSSMB_Enabled`,
+   which the ConfigBuilder loop turns into the composed name `APS_OpenAPSSMB`, while
+   `ConfigBuilderImpl.composedKeyFor` builds `PluginType.name + "_" + p::class.simpleName` -
+   `APS_OpenAPSSMBPlugin`. The two spellings never met, so nothing read it.
+
+   This is not only untidy: that branch is the one that turns the replacement plugin ON when the
+   user's `OpenAPSSMBDynamicISFPlugin` is removed. Since January 2024 it has done nothing, so someone
+   upgrading from a pre-2024 install with DynamicISF enabled ended up with **no APS plugin turned on
+   at all**. It writes `BooleanComposedKey.ConfigBuilderEnabled` with `APS_OpenAPSSMBPlugin` directly
+   now, so it no longer depends on the raw loop parsing the name back the way it was spelled.
+
+   The gating was deliberately left alone - the plugin is enabled for everyone, the dynamic
+   sensitivity flag only off a client - because whether a client should carry an APS plugin is a
+   separate question and not one to settle inside a bug fix.
+2. **FIXED, 2026-09-22.** Step 11 deleted the DIA keys before `dataMigrations` used them; a crash in
+   between lost them. The gap is bigger than it sounds: between the two sits `vacuumDatabaseIfDue`,
+   which documents in its own comment that it can take the process down below the JVM where no
+   `catch` reaches, and that is not theoretical - it already has a crash-loop guard because it
+   happened. The only copy of those DIA values was `MainApp.profileNameToDia`, a field, in memory.
+
+   Losing them is not "migrate again next time": the next start finds no keys, takes the
+   `profileNameToDia.isEmpty()` branch and stamps the legacy records with a substituted insulin. That
+   is wrong IOB on historical records, and it is one-way - the `insulinEndTime = -1` sentinel is
+   consumed and those rows are never revisited.
+
+   The raw keys are now collected into `legacyProfileKeysToRemove` and dropped in `dataMigrations`,
+   at the first point where losing them costs nothing: after `localInsulinManager.addNewInsulin` has
+   put the DIA in the insulin list. The `_name` keys are held to the same point, because the
+   name-to-index pairing is what makes the DIA values usable on a retry.
+3. **FIXED, 2026-09-22.** The key-moving loops used `value as Long` / `as Boolean` / `as String`, and
+   indexed key parts directly (`key.split("_")[2]`). Both throw, and `doMigrations` runs inside the
+   start-up `try` in `onCreate`, so either one is caught as "Fatal initialization error" and **the
+   app does not start at all** - for one odd value in a key nobody has read since 2023. The user's
+   way out is clearing app data, which is the thing this whole document exists to prevent.
+
+   Now `migrateLong` / `migrateBoolean` / `migrateString` in `MainApp`, over
+   `LegacyPreferenceValue`. A value that will not convert, or a key that is not shaped the way its
+   prefix suggests, is logged and SKIPPED, and **the raw key is left in place** - it is still there
+   to look at, the migration runs again next start, and the trash sweep owns the remains. Nothing
+   guesses a replacement.
+
+   Two traps are pinned by `LegacyPreferenceValueTest` because both are silent and both are one
+   edit away: `toBooleanStrictOrNull` must not become `toBoolean` (which reads "yes", "1" and "" as
+   a real `false` and would turn a plugin off), and the String check must not become `toString()`
+   (which would hand the profile migration a number where it expects an ISF array). A dead duplicate
+   `_ic` block went in the same change.
 4. The import writes every key in the file, including unknown and not exportable ones.
 5. Pump runtime state, pump identity and sync cursors are exportable, so every import restores
    another time's or another phone's state (the old import that restarted the app did the same).
@@ -1013,22 +1186,127 @@ allowed; shipping 3 before 1 and 2 is not.
      the old XML. The old values are orphans for the trash sweep in 4.1 decision 4 to remove.
 
    Identity and cursors are untouched and still open.
-6. Today's import decides "pump changed" from a live serial that Dana and Diaconn keep empty until
-   the next connection, so it may take that path for an unchanged pump (section 1; small effect).
-7. **PARTLY FIXED.** `LoopPlugin` and `OmnipodErosPumpPlugin` leak background work on a stop and
-   start. Done: `LoopPlugin`'s collectors are held in `collectors` and cancelled in `onStop`
-   (`bec12877b2`); `OmnipodErosPumpPlugin.onStop` removes its `loopHandler` callbacks, deliberately
-   without quitting the looper (`4d8d7e2ff3`); `XdripPlugin` removes callbacks before `quitSafely`
-   (`334b25b628`). **Still leaking:** the four entries in
-   `PluginLifetimeWorkScanTest.survivesStop` - worst `LoopPlugin#invoke`'s
-   `appScope.launch { delay(1000); invoke(...) }`, which reschedules a loop run one second later,
-   inside the restart window. That list is the worklist and should only ever get shorter.
-8. `DesktopSp.persist()` rewrites the file in place; a crash can leave it truncated.
-9. `InstaraStringKey.DeviceMetaJson` KDoc versus its `exportable`; `GoogleDriveRefreshToken` is
-   exported (check whether intended).
-10. Stale comments: `PluginBaseWithPreferences.beforeImport`/`afterImport` KDoc says the app
-    restarts after an import; the `MainApp` comment about field injection before `doMigrations`;
-    the `IntentKey` KDoc list (`SmsIntentKey` is in `:plugins:sync` now).
+6. **FIXED, 2026-09-22 - and "small effect" was wrong.** The import decided "pump changed" from a
+   live serial that Dana and Diaconn keep empty until the next connection, so it took that path for
+   an unchanged pump. What that path actually does, read this time instead of assumed:
+
+       pumpSync.connectNewPump()                 // endRunning defaults to TRUE
+       commandQueue.cancelAll(..., success = false)
+
+   `connectNewPump(endRunning = true)` writes a stop for the running temporary basal **and** the
+   running extended bolus, then removes `ActivePumpType`, `ActivePumpSerialNumber` and
+   `ActivePumpChangeTimestamp`. So on an unchanged pump it recorded the TBR and EB as finished while
+   the pump carried on delivering them - AAPS then under-counts IOB against a pump that is still
+   running the basal - wiped the pump identity, so the re-registration sets a new "accept nothing
+   older than now" timestamp and the pump's own history up to that point stops being accepted, and
+   failed whatever was queued. None of that is small, and none of it needs the pump to have changed:
+   `DanaPump.serialNumber` is `var serialNumber = ""` and `DiaconnG8Pump.serialNo` is `var serialNo =
+   0`, both plain in-memory fields that are empty on every app start until the first connection.
+
+   The fix puts each piece of knowledge where it belongs:
+   - `verifyPumpIdentification` treats a **blank** serial as "not known yet" rather than "a different
+     pump". This is the generic truth and it covers every driver, present and future.
+   - `DiaconnG8Plugin.serialNumber()` returns "" when `serialNo == 0` instead of the string "0".
+     Only that driver knows what its own unset value looks like; previously it handed out "0" and
+     every caller compared a real serial against it.
+
+   Being lenient here is the safe direction because it is **caught, not swallowed**: if the pump
+   really did change, the serial arrives with the first history record and `confirmActivePump`
+   rejects records that do not match and posts `WRONG_PUMP_DATA`. The failure mode becomes a visible
+   refusal to mix two pumps' histories, instead of silently ending a live temporary basal.
+
+   `verifyPumpIdentification` has exactly one production caller (`ImportViewModel`), which is what
+   made this safe to change. Two tests in `PumpSyncConcentrationTest` pin it, and both were checked
+   by reverting only `PumpSyncImplementation.kt` - both fail without the fix. The second exists to
+   stop the leniency being widened later: a serial that is present and different is still a different
+   pump.
+
+   Note the interaction with item 5: pump identity is still exportable, so an import can leave the
+   stored identity belonging to the phone the file came from. That is the case where this leniency
+   and the `confirmActivePump` backstop do the work, and it is another reason to finish item 5.
+7. **The worklist is empty, 2026-09-22 - but the list is not.** `LoopPlugin` and
+   `OmnipodErosPumpPlugin` leaked background work on a stop and start. Done: `LoopPlugin`'s
+   collectors are held in `collectors` and cancelled in `onStop` (`bec12877b2`);
+   `OmnipodErosPumpPlugin.onStop` removes its `loopHandler` callbacks, deliberately without quitting
+   the looper (`4d8d7e2ff3`); `XdripPlugin` removes callbacks before `quitSafely` (`334b25b628`).
+
+   `PluginLifetimeWorkScanTest.survivesStop` went from four entries to **two**, and the worst one is
+   gone: `LoopPlugin`'s `appScope.launch { delay(1000); invoke(...) }` - a loop run rescheduled one
+   second later, inside the restart window - is now `scheduleSmbFallback`, held in `smbFallbackJob`
+   and cancelled in `onStop`. `scheduleBuildAndStoreDeviceStatus` went the same way, into
+   `deviceStatusJob`.
+
+   **The two that remain are decisions, not debt**, and neither should be "fixed":
+   - `VirtualPumpPlugin#deliverTreatment` - a one-shot launch that persists a bolus. Cancelling it
+     would be the bug. It reschedules nothing; it can still write during a restart window, which is
+     the window's problem to solve (4.1 decision 2), not the plugin's.
+   - `InsightPlugin#bolusProgressData` - a misattributed key. The plugin launches nothing; the real
+     launches are in `InsightOverviewState` and are meant to outlive the screen, because owning them
+     would cancel a pump command when the user navigates away.
+
+   So nothing here blocks the rest of the plan. The rule stands for what comes next: the list only
+   ever gets shorter, and nothing joins it without a reason written beside it.
+8. **FIXED, 2026-09-22.** `DesktopSp.persist()` rewrote the file in place. Opening a file for
+   writing truncates it at once, so a crash, a kill, a full disk or a power cut after that point
+   left a preferences file that was empty or cut in half - and there is no second copy, so the next
+   start reads it, finds nothing, and every AAPS setting on that machine is back to its default.
+
+   Now written to a `.new` sibling, forced to disk with `fd.sync()`, then moved over the real file
+   with `ATOMIC_MOVE` (falling back to a plain replacing move where the filesystem will not do it -
+   still better, because the content is complete before the move starts). A reader sees the old file
+   or the new one, never a half-written one.
+
+   `DesktopSpTest` pins it, and the pin was checked by reverting only `DesktopSp.kt`: exactly one
+   test fails against the old code, the one that targets the fix. It is deliberately white box - it
+   blocks the `.new` sibling with a directory to make the write fail after the point where the old
+   version had already truncated the real file. The crash itself is not reproducible in a unit test;
+   this gets as close as a portable test can.
+9. **FIXED, 2026-09-22 - and the second half turned out not to be a bug.**
+
+   `InstaraStringKey.DeviceMetaJson` said `exportable=false` in its KDoc and never passed the flag,
+   so it inherited `true` and went into every export. Now `exportable = false`. This is the first
+   thing `prefs-schema.txt` caught that nothing else could have: the contradiction was between a
+   comment and a default, and neither a compiler nor a reviewer reading one file would see it.
+
+   The snapshot also showed **two** exported OAuth refresh tokens, not one -
+   `google_drive_refresh_token` and `openhumans_refresh_token` (the second was never suspected).
+   **Both stay `exportable = true`, deliberately.** The rule this plan applies everywhere else is
+   "export what can be meaningfully restored", and a refresh token is the case where the answer is
+   yes: it is issued to the app for an ACCOUNT, not bound to a handset, so it survives a transfer and
+   cloud backup keeps working on a new phone with no re-authorisation. That is what a settings backup
+   is for. Against that: it is credential material in a file people share. It is a small risk here -
+   Drive is requested with `drive.file` (`GoogleDriveProvider.SCOPE`), which reaches only files AAPS
+   itself created, so a leak costs the backup folder and not the account; OpenHumans grants upload to
+   that user's own account; and the export file is encrypted, `content` being ciphertext behind a
+   salt.
+
+   Known and accepted: both providers rotate the refresh token on use, so two phones holding the
+   same one will fight and the loser is signed out. On a real transfer that is the wanted outcome.
+
+   Compare with the keys that went the other way. A Combo nonce cannot be restored at all (it is
+   bound to a live pairing). A `last_processed_*` timestamp can be restored but must not be - the new
+   phone would skip readings. A refresh token can be, and should be.
+10. **FIXED, 2026-09-22.** Three stale comments, all of which described an app that no longer exists:
+    - `PluginBaseWithPreferences.beforeImport`/`afterImport` said "App is restarted after import."
+      It is not. Both now say so, and say what replaced it: the plugins are stopped, the preferences
+      replaced and the plugins started again in the same process, inside the window where
+      `config.appInitialized` is false. This is the comment a plugin author reads before deciding
+      what to keep across an import, so it was the worst of the three.
+    - The `MainApp` comment claimed `ProfileRepository` "already loaded during field injection".
+      There is no field injection any more - it is a lazy `metroGraphs` accessor, so whether it was
+      built before that line depends on what else pulled it in. The `reset()` call stays and the
+      comment now says why: it costs a re-read when nothing was loaded and is the difference between
+      a right and a stale profile when something was.
+    - The `IntentKey` KDoc listed `SmsIntentKey` in `:plugins:main` (it is in `:plugins:sync`) **and
+      an `OverviewIntentKey` that exists nowhere in the repository** - the second error was not in
+      this entry and was found only by checking all four names instead of the one named here. The
+      inventory is gone, replaced by the rule (intent keys belong to the module that owns the
+      intent) and a note not to grow it back into a list, since that is what rotted.
+
+    Noted, not done: `IntentKey` is an empty enum whose `entries` both `PreferencesImpl` files still
+    register, so it is not unreferenced - but it contributes nothing and is a deletion candidate.
+    Left alone because removing a type from `:core:keys` is a change with its own review surface,
+    not a comment fix.
 11. **STILL LIVE, and re-measured 2026-09-21 - the cause below was only half right.**
     `ConfigBuilderImpl.loadSettings()` launches every plugin's `onStart` before
     `activePlugin.verifySelectionInCategories()` picks the active plugins, so a plugin that reads
@@ -1070,17 +1348,92 @@ allowed; shipping 3 before 1 and 2 is not.
     contract. Note this does **not** fix 11: `loadSettings` still schedules `onStart` before electing,
     so the ordering is unchanged - what changed is that "plugins have started" is now true when
     `initialize()` returns.
+13. **FIXED, 2026-09-22 - found on a real phone the same day: local settings export turned itself off
+    and said nothing.** The Local button is gated on a PERSISTED SAF grant, not on the folder:
+
+        override fun isDirectoryAccessGranted(): Boolean {
+            val uriString = preferences().getIfExists(StringKey.AapsDirectoryUri)
+            if (uriString.isNullOrEmpty()) return false
+            val uri = uriString.toUri()
+            return context.contentResolver.persistedUriPermissions.any {
+                it.uri == uri && it.isReadPermission && it.isWritePermission
+            }
+        }
+
+    Android drops a persisted grant on reinstall and on "clear storage". When that happens the AAPS
+    directory still exists, the old exports are still in it, and the button simply goes grey - no
+    notification, no "access to the AAPS directory was lost, grant it again". On the phone this was
+    found on, the last local export was **2026-06-01** and every export since had gone to cloud only;
+    nobody knew. Re-granting through Maintenance -> AAPS directory fixed it immediately.
+
+    Two things make it worse than it sounds. A user with no cloud configured has **no working backup
+    at all** and no sign of it. And `/sdcard/AAPS/preferences/` on that phone holds a **0-byte**
+    `2026-05-19_215955_full.json`, which looks like the same failure leaving a husk behind - a file
+    that reads as a backup in the list until the day it is needed.
+
+    This belongs in a document about not losing settings: every other part of the plan protects the
+    values while a backup path that silently stops is how they are lost in the first place. The fix is
+    not the gate, which is correct - it is that losing the grant must be **visible**.
+
+    **FIXED, 2026-09-22, and the cause was one line narrower than this entry said.** AAPS already had
+    a notification for this area, and the reason it never fired is exactly the distinction above:
+
+        if (preferences.getIfExists(StringKey.AapsDirectoryUri).isNullOrEmpty())
+            notificationManager.post(id = NotificationId.AAPS_DIR_NOT_SELECTED, ...)
+
+    It only ever asked whether the URI string is present. On the phone this was found on it WAS
+    present - what had gone was the permission behind it - so the directory counted as "selected" and
+    nothing was posted. `MainApp` now has an `else if (!fileListProvider.isDirectoryAccessGranted())`
+    branch posting a new `AAPS_DIR_ACCESS_LOST`, with its own string saying that settings are no
+    longer saved to the phone and to pick the directory again. Tapping it opens the same picker as
+    its sibling, so re-granting is one tap.
+
+    **The level in the sentence above was wrong and is not what was built.** `NotificationId` reserves
+    URGENT for "acute insulin-delivery failures, critical BG, and user-configured alarms" - it is the
+    alarm tier, with sound, ramp and a full-screen takeover. Waking someone at night over a backup
+    folder would be the wrong trade and would cheapen the tier that pump and BG alarms depend on.
+    It is IMPORTANT, beside `DISK_FULL` and `GOOGLE_DRIVE_ERROR`: it persists, it cannot be missed,
+    and it does not sound an alarm.
+
+    Not covered, and worth knowing: the 0-byte `2026-05-19_215955_full.json` husk is a separate
+    defect - a file that reads as a backup in the list until the day it is needed. Nothing here makes
+    an empty export file visible as empty.
 
 ## 6. Open questions
 
-1. Wear: when, and with the same design?
-2. Insight pairing: move it into registered keys (3.6), so "restore pump configuration" also works
+1. ~~Wear: when, and with the same design?~~ **ANSWERED 2026-09-22: wear is not touched by this
+   plan.** It is a separate app with its own `PreferencesImpl`
+   (`wear/src/main/kotlin/app/aaps/wear/sharedPreferences/PreferencesImpl.kt`) and its own
+   registration, so none of the rules here apply to it. `RawPreferenceStoreScanTest` therefore
+   excludes `wear/` wholesale rather than allowlisting its ~35 files one by one - an exclusion that
+   states the decision rather than tolerating a violation. If wear is ever brought in, it is its own
+   piece of work with its own answers, not an extension of this one.
+2. ~~Insight pairing: move it into registered keys (3.6), so "restore pump configuration" also works
    after a reinstall on the same phone and the raw-store allowlist loses an entry? The counter-weight
-   is a pump secret in the export file.
+   is a pump secret in the export file.~~ **ANSWERED 2026-09-22: the same as ComboV2 - see 4.1
+   decision 5.** An Insight pairing is the same kind of thing as a Combo nonce: a secret negotiated
+   between THIS phone and THAT pump, which no file can meaningfully restore. So
+   `PairingDataStorage`'s keys become registered keys marked `exportable = false`, they never enter an
+   export, and the "counter-weight" in the question - a pump secret in the export file - simply does
+   not arise. It also stops being a raw-store entry, which is the other half of what the question
+   asked.
+
+   What the question hoped for was that restoring pump configuration would re-establish a pairing
+   after a reinstall. Decision 5 settles that it cannot, for Insight the same as for ComboV2, and the
+   honest path is to re-pair. The work it does need is the registration itself: unlike ComboV2 - whose
+   eleven keys are already in `ownPreferences` - `PairingDataStorage` reads `SharedPreferences`
+   directly, so its keys are owned by nobody and the preserve-by-owner rule cannot see them. Register
+   them under `InsightPlugin.ownPreferences` and "all except pump" leaves them alone for free. Until
+   then they look like unregistered trash to the removal rule, which is why `PairingDataStorage` sits
+   in `RawPreferenceStoreScanTest`'s `toDo` list beside the three ComboV2 files. Today Insight has no
+   `beforeImport`/`afterImport` backup at all, so this is a fix it never had.
 
 Decided 2026-09-19: pump configuration is restored only through the checkbox (3.4); queued
 commands are cancelled on every import, at the quiet point (3.4, 3.5); snapshots are recorded
 automatically by local test runs and only compared in CI (3.3).
+
+**Section 6 is now empty.** Every question here has an answer, and every 4.1 decision is settled. What
+remains is ordering, not choices - see the chain at the end of 4.2.
 
 ## 7. Review log
 
