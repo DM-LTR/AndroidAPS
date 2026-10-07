@@ -34,10 +34,10 @@ import app.aaps.core.interfaces.queue.CommandQueue
 import app.aaps.core.objects.constraints.ConstraintObject
 import app.aaps.core.objects.profile.ProfileSealed
 import app.aaps.core.objects.runningMode.RunningModeGuard
-import app.aaps.core.ui.CoreUiStrings
 import app.aaps.core.objects.wizard.BolusWizard
 import app.aaps.core.objects.wizard.QuickWizard
 import app.aaps.core.objects.wizard.QuickWizardEntry
+import app.aaps.core.ui.CoreUiStrings
 import app.aaps.shared.tests.TestBaseWithProfile
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.CoroutineScope
@@ -331,6 +331,73 @@ class WizardBolusExecutorImplTest : TestBaseWithProfile() {
         executor.confirm(prepared.bolusId, Sources.NSClient, { })
 
         verify(quickWizard, never()).get(any<String>())
+    }
+
+    // ---- confirm(onSuccess): the end of an asynchronous dose, for a caller that has to wait for it (SMS) ----
+
+    @Test
+    fun confirm_batchBolusDelivered_callsOnSuccessNotOnError() = runTest {
+        whenever(runningModeGuard.rejectionMessage(any())).thenReturn(null)
+        whenever(commandQueue.bolus(anyOrNull())).thenReturn(pumpEnactResultProvider().success(true))
+        stubPassthroughConstraints()
+        val executor = create()
+        val bolus = BatchAction.Bolus(insulin = 1.0, carbs = 0, carbsTimeOffsetMinutes = 0, carbsDurationHours = 0, recordOnly = false, notes = "", timestamp = 0L, iCfg = null)
+        val prepared = executor.prepareBatch(listOf(bolus)) as WizardBolusExecutor.PrepareResult.Preview
+
+        var successes = 0
+        var error: WizardBolusExecutor.Failure? = null
+        executor.confirm(prepared.bolusId, Sources.SMS, { error = it }, onSuccess = { successes++ })
+
+        assertThat(successes).isEqualTo(1)
+        assertThat(error).isNull()
+    }
+
+    @Test
+    fun confirm_batchBolusFailsOnPump_callsOnErrorNotOnSuccess() = runTest {
+        whenever(runningModeGuard.rejectionMessage(any())).thenReturn(null)
+        whenever(commandQueue.bolus(anyOrNull())).thenReturn(pumpEnactResultProvider().success(false).comment("pump error"))
+        stubPassthroughConstraints()
+        val executor = create()
+        val bolus = BatchAction.Bolus(insulin = 1.0, carbs = 0, carbsTimeOffsetMinutes = 0, carbsDurationHours = 0, recordOnly = false, notes = "", timestamp = 0L, iCfg = null)
+        val prepared = executor.prepareBatch(listOf(bolus)) as WizardBolusExecutor.PrepareResult.Preview
+
+        var successes = 0
+        var error: WizardBolusExecutor.Failure? = null
+        val result = executor.confirm(prepared.bolusId, Sources.SMS, { error = it }, onSuccess = { successes++ })
+
+        // confirm only started the bolus; the failure comes afterwards, through onError alone.
+        assertThat(result).isEqualTo(WizardBolusExecutor.ConfirmResult.Delivered)
+        assertThat(error).isNotNull()
+        assertThat(successes).isEqualTo(0)
+    }
+
+    @Test
+    fun confirm_batchCarbsOnly_callsOnSuccess() = runTest {
+        whenever(commandQueue.bolus(anyOrNull())).thenReturn(pumpEnactResultProvider().success(true))
+        stubPassthroughConstraints()
+        val executor = create()
+        val carbs = BatchAction.Bolus(insulin = 0.0, carbs = 20, carbsTimeOffsetMinutes = 0, carbsDurationHours = 0, recordOnly = false, notes = "", timestamp = 0L, iCfg = null)
+        val prepared = executor.prepareBatch(listOf(carbs)) as WizardBolusExecutor.PrepareResult.Preview
+
+        var successes = 0
+        executor.confirm(prepared.bolusId, Sources.SMS, { }, onSuccess = { successes++ })
+
+        assertThat(successes).isEqualTo(1)
+    }
+
+    @Test
+    fun confirm_batchWithoutDose_neverCallsOnSuccess() = runTest {
+        // Nothing to wait for: a temp target is awaited inside confirm, so the return value is the whole answer.
+        stubPassthroughConstraints()
+        val executor = create()
+        val target = BatchAction.TempTarget(reason = TT.Reason.ACTIVITY.text, lowMgdl = 140.0, highMgdl = 140.0, durationMinutes = 60, startOffsetMinutes = 0)
+        val prepared = executor.prepareBatch(listOf(target)) as WizardBolusExecutor.PrepareResult.Preview
+
+        var successes = 0
+        val result = executor.confirm(prepared.bolusId, Sources.SMS, { }, onSuccess = { successes++ })
+
+        assertThat(result).isEqualTo(WizardBolusExecutor.ConfirmResult.Delivered)
+        assertThat(successes).isEqualTo(0)
     }
 
     @Test
