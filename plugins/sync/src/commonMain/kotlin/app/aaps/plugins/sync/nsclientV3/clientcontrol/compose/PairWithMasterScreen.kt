@@ -44,6 +44,7 @@ import app.aaps.core.keys.interfaces.ClientRole
 import app.aaps.core.ui.CoreUiStrings
 import app.aaps.core.ui.clientcontrol.label
 import app.aaps.core.ui.compose.AapsSpacing
+import app.aaps.core.ui.compose.qrScannerAvailable
 import app.aaps.core.ui.compose.AapsTopAppBar
 import app.aaps.core.ui.compose.clearFocusOnTap
 import app.aaps.core.ui.compose.metroViewModel
@@ -56,6 +57,8 @@ private const val PIN_LENGTH = 8
 @Composable
 fun PairWithMasterScreen(
     onNavigateBack: () -> Unit,
+    /** After a successful pairing. From the setup wizard it finishes the wizard. */
+    onPaired: () -> Unit = onNavigateBack,
     /** Opens the scanner for the master's QR code. Null hides the button; it is hidden anyway where there is no camera. */
     onScanQr: (() -> Unit)? = null,
     viewModel: PairWithMasterViewModel = metroViewModel()
@@ -79,13 +82,13 @@ fun PairWithMasterScreen(
     )
 
     // After successful pair, drop back to the previous screen so the user lands wherever they came
-    // from. Latched so a recomposition while state is still Success cannot pop twice — the
-    // ViewModel's Success state is sticky, but onNavigateBack is not idempotent.
+    // from (or out of the setup wizard). Latched so a recomposition while state is still Success cannot
+    // pop twice — the ViewModel's Success state is sticky, but onPaired is not idempotent.
     var navigated by remember { mutableStateOf(false) }
     LaunchedEffect(state) {
         if (state is PairWithMasterViewModel.UiState.Success && !navigated) {
             navigated = true
-            onNavigateBack()
+            onPaired()
         }
     }
 

@@ -11,6 +11,7 @@ import app.aaps.core.nssdk.localmodel.clientcontrol.ClientSetupCode
 import app.aaps.core.nssdk.localmodel.clientcontrol.PairingPayload
 import app.aaps.plugins.sync.nsclientV3.NSClientV3Plugin
 import app.aaps.plugins.sync.nsclientV3.clientcontrol.ClientPairingRepository
+import app.aaps.plugins.sync.nsclientV3.clientcontrol.MasterDocVerifier
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -39,6 +40,7 @@ internal class ScanMasterQrViewModelTest {
     @Mock private lateinit var nsClientV3Plugin: NSClientV3Plugin
     @Mock private lateinit var dateUtil: DateUtil
     @Mock private lateinit var aapsLogger: AAPSLogger
+    @Mock private lateinit var masterDocVerifier: MasterDocVerifier
 
     private lateinit var sut: ScanMasterQrViewModel
 
@@ -53,7 +55,7 @@ internal class ScanMasterQrViewModelTest {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         whenever(dateUtil.now()).thenReturn(now)
         whenever(nsClientV3Plugin.isEnabled()).thenReturn(true)
-        sut = ScanMasterQrViewModel(pairingRepository, preferences, configBuilder, { nsClientV3Plugin }, dateUtil, aapsLogger)
+        sut = ScanMasterQrViewModel(pairingRepository, preferences, configBuilder, { nsClientV3Plugin }, dateUtil, aapsLogger, masterDocVerifier)
     }
 
     @AfterEach
@@ -151,13 +153,59 @@ internal class ScanMasterQrViewModelTest {
         assertThat(sut.state.value).isEqualTo(ScanMasterQrViewModel.UiState.Error(ScanMasterQrViewModel.ErrorReason.SecretStoreFailed))
     }
 
+    /**
+     * The master's key for its settings docs: the only way a phone that only reads Nightscout gets it. Kept after the
+     * address is written (it belongs to that Nightscout) and before NSClient is switched on and reads the first doc.
+     */
     @Test
-    fun `NSClient is switched on when it is off`() = runTest {
+    fun `the master's signing key is kept for the new address`() = runTest {
+        whenever(nsClientV3Plugin.isEnabled()).thenReturn(false)
+        sut.onScanned(ClientSetupCode.encode(nsOnly.copy(signingKey = "master-key")))
+
+        sut.confirm()
+
+        val order = inOrder(preferences, masterDocVerifier, configBuilder)
+        order.verify(preferences).put(StringKey.NsClientUrl, "https://ns.example")
+        order.verify(masterDocVerifier).keepKey("master-key")
+        order.verify(configBuilder).performPluginSwitch(nsClientV3Plugin, true, PluginType.SYNC)
+    }
+
+    /** The wizard does not ask for the name again: the client takes the one it was added with on the master. */
+    @Test
+    fun `the name from the master becomes the instance name`() = runTest {
+        whenever(preferences.get(StringKey.GeneralInstanceName)).thenReturn("")
+        sut.onScanned(ClientSetupCode.encode(nsOnly.copy(name = "Miloš")))
+
+        sut.confirm()
+
+        verify(preferences).put(StringKey.GeneralInstanceName, "Milos")
+    }
+
+    @Test
+    fun `an instance name the user gave stays`() = runTest {
+        whenever(preferences.get(StringKey.GeneralInstanceName)).thenReturn("Tablet")
+        sut.onScanned(ClientSetupCode.encode(nsOnly.copy(name = "S10e")))
+
+        sut.confirm()
+
+        verify(preferences, never()).put(eq(StringKey.GeneralInstanceName), any<String>())
+    }
+
+    /**
+     * After the settings: switched on first, a fresh client made its Nightscout client with no address and sent the
+     * hello to "https://api/...".
+     */
+    @Test
+    fun `NSClient is switched on when it is off, after its settings are written`() = runTest {
         whenever(nsClientV3Plugin.isEnabled()).thenReturn(false)
         sut.onScanned(ClientSetupCode.encode(nsOnly))
 
         sut.confirm()
 
-        verify(configBuilder).performPluginSwitch(nsClientV3Plugin, true, PluginType.SYNC)
+        val order = inOrder(preferences, configBuilder)
+        order.verify(preferences).put(StringKey.NsClientUrl, "https://ns.example")
+        order.verify(preferences).put(StringKey.NsClientAccessToken, "aapstablet-0123456789abcdef")
+        order.verify(preferences).put(BooleanKey.NsClient3UseWs, true)
+        order.verify(configBuilder).performPluginSwitch(nsClientV3Plugin, true, PluginType.SYNC)
     }
 }

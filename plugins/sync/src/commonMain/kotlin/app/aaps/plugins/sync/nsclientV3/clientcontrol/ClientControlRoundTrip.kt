@@ -26,6 +26,7 @@ import app.aaps.core.nssdk.localmodel.clientcontrol.AckPhase
 import app.aaps.core.nssdk.localmodel.clientcontrol.AckStatus
 import app.aaps.core.nssdk.localmodel.clientcontrol.BolusPreview
 import app.aaps.core.nssdk.localmodel.clientcontrol.ClientControlMessage
+import app.aaps.core.nssdk.localmodel.clientcontrol.PongPayload
 import app.aaps.core.nssdk.localmodel.clientcontrol.PrefEntry
 import app.aaps.core.nssdk.localmodel.clientcontrol.ProgressEnvelope
 import app.aaps.core.nssdk.localmodel.clientcontrol.ProgressPhase
@@ -56,6 +57,8 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -91,6 +94,7 @@ class ClientControlRoundTrip(
     private val rh: TextResolver,
     private val bolusProgressData: BolusProgressData,
     private val aapsLogger: AAPSLogger,
+    private val masterDocVerifier: MasterDocVerifier,
     // Plain CoroutineScope, not @ApplicationScope: that qualifier is javax and cannot appear in
     // commonMain. AppCoroutineBindings.unqualifiedAppScope provides the same scope unqualified.
     private val appScope: CoroutineScope
@@ -180,6 +184,11 @@ class ClientControlRoundTrip(
         // for the next devicestatus heartbeat.
         nsClientV3Plugin().bumpMasterSignal(dateUtil.now())
         nsClientRepository.addLog("◄ CLIENTCTL", "ack ${ack.phase}/${ack.status} counter=${ack.commandCounter}" + (ack.reason?.let { " ($it)" } ?: ""))
+        // A pong carries the master's key for its settings docs. Other payloads (a prepared bolus, a failure text) have
+        // no such field, or are not JSON at all.
+        if (ack.phase == AckPhase.Done && ack.status == AckStatus.Ok)
+            ack.payload?.let { runCatching { json.decodeFromString(PongPayload.serializer(), it) }.getOrNull() }?.signingKey
+                ?.let { masterDocVerifier.keepKey(it) }
         // A late Delivery/Failed ack relays an async bolus failure the master only learned AFTER its Done ack —
         // raise an URGENT alarm here. It is NOT a round-trip response (the commit already terminated), so it does
         // not feed ackEvents; the master itself alarmed locally too (executor, phase 1a).
@@ -282,10 +291,13 @@ class ClientControlRoundTrip(
     /**
      * The hello with a key exchange, when this pairing's secret is still to be replaced and no exchange is waiting for
      * its answer: a new pairing (from a QR code too, which could not say hello before it reached Nightscout), or one
-     * made before the key exchange existed. Answered by a key doc, no ACK. Null when none was due.
+     * made before the key exchange existed. Answered by a key doc, no ACK. Null when none was due. Called on each
+     * connect and before each probe, which can run at the same time: the lock keeps it to one hello.
      */
-    suspend fun sendHelloIfDue(): ClientControlSendResult? =
+    suspend fun sendHelloIfDue(): ClientControlSendResult? = helloMutex.withLock {
         if (pairingRepository.needsKeyExchange(dateUtil.now())) publisher.publishHello() else null
+    }
+    private val helloMutex = Mutex()
 
     // The single app-level modal signal (progress + label), fed by every run()/execute() regardless of
     // feature. Hosted once in ComposeMainActivity; round-trips are single-in-flight so at most one shows.
