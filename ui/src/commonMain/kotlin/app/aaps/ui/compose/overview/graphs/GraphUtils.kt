@@ -1,9 +1,17 @@
 package app.aaps.ui.compose.overview.graphs
 
+import androidx.compose.animation.core.AnimationState
+import androidx.compose.animation.core.DecayAnimationSpec
+import androidx.compose.animation.core.animateDecay
+import androidx.compose.animation.rememberSplineBasedDecay
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -12,11 +20,16 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import app.aaps.core.data.ui.MarkerTier
 import app.aaps.core.interfaces.overview.graph.SeriesType
 import com.patrykandpatrick.vico.compose.cartesian.CartesianDrawingContext
 import com.patrykandpatrick.vico.compose.cartesian.CartesianMeasuringContext
+import com.patrykandpatrick.vico.compose.cartesian.Scroll
+import com.patrykandpatrick.vico.compose.cartesian.VicoScrollState
 import com.patrykandpatrick.vico.compose.cartesian.axis.Axis
 import com.patrykandpatrick.vico.compose.cartesian.axis.HorizontalAxis
 import com.patrykandpatrick.vico.compose.cartesian.axis.VerticalAxis
@@ -27,7 +40,11 @@ import com.patrykandpatrick.vico.compose.cartesian.layer.LineCartesianLayer
 import com.patrykandpatrick.vico.compose.common.Fill
 import com.patrykandpatrick.vico.compose.common.component.ShapeComponent
 import com.patrykandpatrick.vico.compose.common.data.ExtraStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.datetime.TimeZone
@@ -55,7 +72,8 @@ import kotlin.time.Instant
  *
  * **Scroll/Zoom Synchronization:**
  * - BG graph (primary): scrollEnabled = true, zoomEnabled = true
- * - Secondary graphs: scrollEnabled = false, zoomEnabled = false
+ * - Secondary graphs: scrollEnabled = false, zoomEnabled = false. A sideways drag on them scrolls
+ *   the BG graph instead ([BgScrollForwarder]), and they follow it like for a drag on BG.
  * - Pixel-based sync: snapshotFlow { bgScrollState.value to bgZoomState.value }
  * - See OverviewGraphsSection for full implementation
  *
@@ -182,6 +200,118 @@ fun Modifier.onScrollOrZoomGesture(onGesture: () -> Unit): Modifier = pointerInp
 }
 
 /**
+ * Scrolls the BG graph for a sideways drag on a graph below it, see [scrollsBgGraph]. One for the
+ * screen, shared by those graphs.
+ *
+ * The drag is not applied to the graph it is on. The graphs below BG follow BG's scroll on every
+ * frame already, so scrolling BG moves all of them, the same as a drag on BG itself. Their own Vico
+ * scroll stays off, for two reasons: graphs that each scroll themselves would have to be synced in
+ * both directions and could pull against each other, and a chart that takes gestures must not get a
+ * new range provider in the middle of one (see `MutableYRangeProvider` in BgGraphCompose), which
+ * these graphs do whenever their axis changes.
+ */
+@Stable
+class BgScrollForwarder internal constructor(private val scope: CoroutineScope, private val decay: DecayAnimationSpec<Float>) {
+
+    /** The BG graph's scroll state. It is recreated by a viewport reset, so it is set on every composition. */
+    internal var target: VicoScrollState? = null
+
+    /**
+     * Pixel deltas, applied one after the other. [VicoScrollState.scroll] suspends and a drag
+     * delivers its moves faster than one scroll may take, so they wait in line instead of one
+     * cancelling the other.
+     */
+    private val deltas = Channel<Float>(Channel.UNLIMITED)
+    private var fling: Job? = null
+
+    init {
+        scope.launch {
+            for (delta in deltas) target?.scroll(Scroll.Relative.pixels(delta))
+        }
+    }
+
+    /** A finger move of [dragAmount] px. Moving the finger to the right shows earlier times, as on BG. */
+    internal fun drag(dragAmount: Float) {
+        deltas.trySend(-dragAmount)
+    }
+
+    /** Goes on after the lift with the finger's speed and slows down, the same fling as on BG. */
+    internal fun fling(velocityX: Float) {
+        stopFling()
+        if (velocityX == 0f) return
+        fling = scope.launch {
+            var last = 0f
+            AnimationState(initialValue = 0f, initialVelocity = velocityX).animateDecay(decay) {
+                drag(value - last)
+                last = value
+            }
+        }
+    }
+
+    /** Stops a fling, at any new touch on the graphs: also one on BG, whose own scroll it would fight. */
+    internal fun stopFling() {
+        fling?.cancel()
+        fling = null
+    }
+}
+
+/** The [BgScrollForwarder] of the screen, scrolling [bgScrollState]. */
+@Composable
+fun rememberBgScrollForwarder(bgScrollState: VicoScrollState): BgScrollForwarder {
+    val scope = rememberCoroutineScope()
+    val decay = rememberSplineBasedDecay<Float>()
+    val forwarder = remember(scope, decay) { BgScrollForwarder(scope, decay) }
+    SideEffect { forwarder.target = bgScrollState }
+    return forwarder
+}
+
+/**
+ * A sideways drag on this graph scrolls all graphs, through [forwarder]. Calls [onGesture] when the
+ * drag starts and ends, like [onScrollOrZoomGesture] does on BG, so a new reading does not reset the
+ * view in the middle of it.
+ *
+ * Only a drag that is clearly sideways is taken, so a vertical swipe still scrolls the page, and a
+ * press that does not move still turns into the press and hold of [inspect]. While inspecting the
+ * moves belong to the finger, not to the scroll.
+ */
+fun Modifier.scrollsBgGraph(forwarder: BgScrollForwarder, inspect: GraphInspectState, onGesture: () -> Unit): Modifier =
+    pointerInput(forwarder, inspect, onGesture) {
+        val velocityTracker = VelocityTracker()
+        detectHorizontalDragGestures(
+            onDragStart = {
+                forwarder.stopFling()
+                velocityTracker.resetTracking()
+                onGesture()
+            },
+            onDragEnd = {
+                onGesture()
+                forwarder.fling(velocityTracker.calculateVelocity().x)
+            },
+            onDragCancel = { onGesture() },
+            onHorizontalDrag = { change, dragAmount ->
+                if (!inspect.fingerDown) {
+                    change.consume()
+                    velocityTracker.addPointerInputChange(change)
+                    forwarder.drag(dragAmount)
+                }
+            }
+        )
+    }
+
+/**
+ * Stops a running fling of [forwarder] at any new touch on the graphs. Observed in the
+ * [PointerEventPass.Initial] pass and never consumed, so the graphs still get every event.
+ */
+fun Modifier.stopsBgFling(forwarder: BgScrollForwarder): Modifier = pointerInput(forwarder) {
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            if (event.type == PointerEventType.Press) forwarder.stopFling()
+        }
+    }
+}
+
+/**
  * Fraction of the graph height occupied by the basal overlay.
  *
  * The basal layer lives on its own (end) axis: basal axis max = `maxBasal / BASAL_HEIGHT_FRACTION`,
@@ -227,7 +357,8 @@ fun filterToRange(
 
 /**
  * Target point size for layout normalization across all synchronized graphs.
- * Must be >= the largest actual point size used in any graph (currently 22dp from IOB SMB/bolus markers).
+ * Must be >= the largest actual point size used in any graph (currently 30 dp: the largest BG graph
+ * marker, 22 dp, in a box grown by the tip gap on both sides, see `MARKER_TIP_GAP`).
  *
  * Every graph includes an invisible normalizer line with this point size (via [createNormalizerLine]).
  * This ensures all charts have the same maxPointSize, which makes Vico compute identical:
@@ -236,7 +367,7 @@ fun filterToRange(
  *
  * Without this, each chart's different point sizes cause different layout, breaking pixel-based sync.
  */
-val NORMALIZER_POINT_SIZE: Dp = 22.dp
+val NORMALIZER_POINT_SIZE: Dp = 30.dp
 
 /**
  * Creates an invisible line with [NORMALIZER_POINT_SIZE] transparent points.
@@ -286,15 +417,23 @@ val TriangleShape: Shape = GenericShape { size, _ ->
 /**
  * Inverted triangle shape pointing downward (flat base at top, apex at bottom).
  *
- * Used for a manual bolus on the BG and IOB graphs, and for carbs on the COB graph. The apex
- * sits at the data point's y-coordinate with the base above it, so it points at the value.
+ * Used for a manual bolus on the BG and IOB graphs, and for carbs on the COB graph. The apex sits at the data point's
+ * y-coordinate with the base above it, so it points at the value.
  */
-val InvertedTriangleShape: Shape = GenericShape { size, _ ->
-    val baseHalf = size.width * 0.3f         // Narrow base for sharper triangle
+val InvertedTriangleShape: Shape = invertedTriangleShape()
+
+/**
+ * [InvertedTriangleShape] with its apex [tipInset] of the box above the box centre, so the tip
+ * stops short of the data point. The base is narrowed by the same share: in a box grown by twice
+ * the inset the triangle keeps the proportions of the plain shape and only moves away from the
+ * point. The BG graph uses it to keep a marker's tip outside the reading dot.
+ */
+fun invertedTriangleShape(tipInset: Float = 0f): Shape = GenericShape { size, _ ->
+    val baseHalf = size.width * 0.3f * (1f - 2f * tipInset)   // Narrow base for sharper triangle
     val cx = size.width / 2f
-    moveTo(cx - baseHalf, 0f)               // Top left (base)
-    lineTo(cx + baseHalf, 0f)               // Top right (base)
-    lineTo(cx, size.height / 2f)            // Bottom center (apex)
+    moveTo(cx - baseHalf, 0f)                                 // Top left (base)
+    lineTo(cx + baseHalf, 0f)                                 // Top right (base)
+    lineTo(cx, size.height * (0.5f - tipInset))               // Bottom center (apex)
     close()
 }
 
@@ -309,18 +448,21 @@ val InvertedTriangleShape: Shape = GenericShape { size, _ ->
  * it from below, so both tips meet at the moment on the curve.
  * Same proportions as the other two.
  */
-val TriangleBelowShape: Shape = GenericShape { size, _ ->
-    val baseHalf = size.width * 0.3f         // Narrow base for sharper triangle
+val TriangleBelowShape: Shape = triangleBelowShape()
+
+/** [TriangleBelowShape] with its apex [tipInset] of the box below the box centre, see [invertedTriangleShape]. */
+fun triangleBelowShape(tipInset: Float = 0f): Shape = GenericShape { size, _ ->
+    val baseHalf = size.width * 0.3f * (1f - 2f * tipInset)   // Narrow base for sharper triangle
     val cx = size.width / 2f
-    moveTo(cx, size.height / 2f)             // Top center (apex), at the data point
-    lineTo(cx + baseHalf, size.height)       // Right base
-    lineTo(cx - baseHalf, size.height)       // Left base
+    moveTo(cx, size.height * (0.5f + tipInset))               // Top center (apex), at the data point
+    lineTo(cx + baseHalf, size.height)                        // Right base
+    lineTo(cx - baseHalf, size.height)                        // Left base
     close()
 }
 
 /**
  * Size of a treatment marker (manual bolus, carbs) per [MarkerTier], the same on every graph.
- * The largest must stay within [NORMALIZER_POINT_SIZE].
+ * The largest, with the BG graph's tip gap added on both sides, must stay within [NORMALIZER_POINT_SIZE].
  */
 internal val MarkerTier.markerSize: Dp
     get() = when (this) {

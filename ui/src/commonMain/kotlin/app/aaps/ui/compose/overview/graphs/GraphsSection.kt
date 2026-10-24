@@ -275,6 +275,8 @@ fun GraphsSection(
             maxZoom = bgMaxZoom
         )
     }
+    // A sideways drag on a graph below BG scrolls BG, and they all follow it
+    val bgScrollForwarder = rememberBgScrollForwarder(bgScrollState)
 
     // Pre-allocate secondary graph scroll/zoom states (up to MAX_SECONDARY_GRAPHS)
     // These are always created to keep Compose's remember slots stable
@@ -487,6 +489,7 @@ fun GraphsSection(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp)
+            .stopsBgFling(bgScrollForwarder)
     ) {
         // Treatment Belt Graph - running mode background + therapy events
         TreatmentBeltGraphCompose(
@@ -650,7 +653,12 @@ fun GraphsSection(
         }
         // Fixed IOB graph (Graph 1) with optional Activity overlay
         var editingIobOverlays by remember { mutableStateOf(false) }
-        Box(modifier = Modifier.pullUp(IOB_GRAPH_PULL_UP)) {
+        Box(
+            modifier = Modifier
+                .pullUp(IOB_GRAPH_PULL_UP)
+                .graphInspectTouch(inspect)
+                .scrollsBgGraph(bgScrollForwarder, inspect, graphViewModel::onGraphInteraction)
+        ) {
             SecondaryGraphCompose(
                 viewModel = graphViewModel,
                 seriesTypes = listOf(SeriesType.IOB),
@@ -666,7 +674,7 @@ fun GraphsSection(
                     .height(graphConfig.iobHeight.dp - REMOVED_TIME_LABELS_HEIGHT)
             )
             GraphNameRow(
-                name = stringResource(CoreUiStrings.iob) + " / " + stringResource(CoreUiStrings.basal_shortname),
+                name = stringResource(InterfacesStrings.values_with_slash, stringResource(CoreUiStrings.iob), stringResource(CoreUiStrings.basal_shortname)),
                 editName = stringResource(CoreUiStrings.iob),
                 onEdit = if (isSimpleMode) null else ({ editingIobOverlays = true }),
                 modifier = Modifier
@@ -676,7 +684,7 @@ fun GraphsSection(
         }
         if (editingIobOverlays) {
             GraphSeriesBottomSheet(
-                title = stringResource(CoreUiStrings.iob) + " / " + stringResource(CoreUiStrings.basal_shortname),
+                title = stringResource(InterfacesStrings.values_with_slash, stringResource(CoreUiStrings.iob), stringResource(CoreUiStrings.basal_shortname)),
                 selectedSeries = graphConfig.iobOverlays,
                 availableSeries = listOf(SeriesType.ACTIVITY),
                 height = graphConfig.iobHeight,
@@ -696,7 +704,12 @@ fun GraphsSection(
         var editingGraphIndex by remember { mutableIntStateOf(-1) }
         for (i in 0 until activeCount) {
             val secondary = graphConfig.secondaryGraphs[i]
-            Box(modifier = Modifier.pullUp(GRAPH_OVERLAP)) {
+            Box(
+                modifier = Modifier
+                    .pullUp(GRAPH_OVERLAP)
+                    .graphInspectTouch(inspect)
+                    .scrollsBgGraph(bgScrollForwarder, inspect, graphViewModel::onGraphInteraction)
+            ) {
                 SecondaryGraphCompose(
                     viewModel = graphViewModel,
                     inspect = inspect,

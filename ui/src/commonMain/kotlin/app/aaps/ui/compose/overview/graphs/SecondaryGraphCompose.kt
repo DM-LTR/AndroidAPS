@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.aaps.core.data.configuration.Constants
+import app.aaps.core.data.ui.MarkerTier
 import app.aaps.core.graph.vico.AdaptiveStep
 import app.aaps.core.graph.vico.Square
 import app.aaps.core.interfaces.overview.graph.BolusType
@@ -42,6 +43,7 @@ import com.patrykandpatrick.vico.compose.cartesian.data.CartesianValueFormatter
 import com.patrykandpatrick.vico.compose.cartesian.data.lineModel
 import com.patrykandpatrick.vico.compose.cartesian.layer.LineCartesianLayer
 import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
+import com.patrykandpatrick.vico.compose.cartesian.marker.CartesianMarkerController
 import com.patrykandpatrick.vico.compose.cartesian.rememberCartesianChart
 import com.patrykandpatrick.vico.compose.common.Fill
 import com.patrykandpatrick.vico.compose.common.Position
@@ -844,6 +846,12 @@ fun SecondaryGraphCompose(
         guideline = LineComponent(fill = Fill(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)))
     )
 
+    // Press and hold works here too. The marker draws nothing, it only hands the time under the
+    // finger to the shared inspect state; the line, the dot and the pill are drawn elsewhere.
+    val inspectMarker = remember(inspect) { inspect?.let { SilentInspectMarker } }
+    val defaultMarkerController = CartesianMarkerController.rememberShowOnPress()
+    val markerController = inspect?.controller ?: defaultMarkerController
+
     if (hasBasalLayer) {
         val basalLayer = rememberLineCartesianLayer(
             lineProvider = LineCartesianLayer.LineProvider.series(basalLines),
@@ -854,7 +862,8 @@ fun SecondaryGraphCompose(
             chart = rememberCartesianChart(
                 primaryLayer, basalLayer,
                 startAxis = startAxis,
-                bottomAxis = bottomAxis, decorations = decorations, getXStep = { _, _, _ -> 1.0 }
+                bottomAxis = bottomAxis, decorations = decorations, getXStep = { _, _, _ -> 1.0 },
+                marker = inspectMarker, markerVisibilityListener = inspect?.visibilityListener, markerController = markerController
             ),
             modelProducer = modelProducer,
             modifier = modifier.fillMaxWidth(),
@@ -870,7 +879,8 @@ fun SecondaryGraphCompose(
             chart = rememberCartesianChart(
                 primaryLayer, secondaryLayer,
                 startAxis = startAxis,
-                bottomAxis = bottomAxis, decorations = decorations, getXStep = { _, _, _ -> 1.0 }
+                bottomAxis = bottomAxis, decorations = decorations, getXStep = { _, _, _ -> 1.0 },
+                marker = inspectMarker, markerVisibilityListener = inspect?.visibilityListener, markerController = markerController
             ),
             modelProducer = modelProducer,
             modifier = modifier.fillMaxWidth(),
@@ -881,7 +891,8 @@ fun SecondaryGraphCompose(
             chart = rememberCartesianChart(
                 primaryLayer,
                 startAxis = startAxis,
-                bottomAxis = bottomAxis, decorations = decorations, getXStep = { _, _, _ -> 1.0 }
+                bottomAxis = bottomAxis, decorations = decorations, getXStep = { _, _, _ -> 1.0 },
+                marker = inspectMarker, markerVisibilityListener = inspect?.visibilityListener, markerController = markerController
             ),
             modelProducer = modelProducer,
             modifier = modifier.fillMaxWidth(),
